@@ -1,0 +1,21 @@
+[project]
+name = "claude-code-statusline"
+version = "1.0.0"
+description = "A colourful, OKLCH-gradient Powerline-style status line for Claude Code."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "derDere" }]
+keywords = ["claude-code", "statusline", "powerline", "oklch", "terminal"]
+dependencies = ["coloraide>=4.0"]
+
+[project.urls]
+Homepage = "https://github.com/derDere/claude-code-statusline"
+Repository = "https://github.com/derDere/claude-code-statusline.git"
+
+# This is a single-file application, not an installable package.
+# At runtime the status line is invoked via `uv run --script statusline.py`,
+# which reads its dependencies from the PEP 723 header inside the script.
+# This pyproject only manages the local dev environment (`uv sync`).
+[tool.uv]
+package = false

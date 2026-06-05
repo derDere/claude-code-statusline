@@ -1,0 +1,7 @@
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Statusline debug dump (STATUSLINE_DEBUG=1)
+_last_payload.json
