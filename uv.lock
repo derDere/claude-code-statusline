@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 [[package]]
 name = "claude-code-statusline"
 version = "1.0.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "coloraide" },
 ]

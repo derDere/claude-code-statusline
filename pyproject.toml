@@ -9,13 +9,19 @@ authors = [{ name = "derDere" }]
 keywords = ["claude-code", "statusline", "powerline", "oklch", "terminal"]
 dependencies = ["coloraide>=4.0"]
 
+# Console entry point -> lets `uvx` run the status line straight from the repo:
+#   uvx --from git+https://github.com/derDere/claude-code-statusline.git claude-code-statusline
+[project.scripts]
+claude-code-statusline = "statusline:main"
+
 [project.urls]
 Homepage = "https://github.com/derDere/claude-code-statusline"
 Repository = "https://github.com/derDere/claude-code-statusline.git"
 
-# This is a single-file application, not an installable package.
-# At runtime the status line is invoked via `uv run --script statusline.py`,
-# which reads its dependencies from the PEP 723 header inside the script.
-# This pyproject only manages the local dev environment (`uv sync`).
-[tool.uv]
-package = false
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Single top-level module (statusline.py), not a package directory.
+[tool.hatch.build.targets.wheel]
+include = ["statusline.py"]
