@@ -226,17 +226,21 @@ def effort_bar(level):
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
 def fmt_tok(n):
-    """1.7k / 46k / 0.2M / 1M — 1 decimal unless round."""
+    """623 -> 623, 1.7k, 46k, 764k, 1M, 1.5M.
+    Only abbreviate once the unit is actually reached: k at >=1000, M at
+    >=1_000_000. One decimal only for small values (<10), else integer."""
     if n is None:
         return "?"
     n = int(n)
-    if n >= 100_000:
-        v = n / 1_000_000
-        return f"{int(v)}M" if v % 1 == 0 else f"{v:.1f}M"
-    if n >= 1_000:
-        v = n / 1_000
-        return f"{int(v)}k" if v % 1 == 0 else f"{v:.1f}k"
-    return str(n)
+    if n >= 1_000_000:
+        v, unit = n / 1_000_000, "M"
+    elif n >= 1_000:
+        v, unit = n / 1_000, "k"
+    else:
+        return str(n)
+    if v < 10 and v != int(v):
+        return f"{v:.1f}{unit}"
+    return f"{int(v)}{unit}"
 
 
 def model_label(mid, mname):
