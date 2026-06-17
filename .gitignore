@@ -2,6 +2,10 @@
 .venv/
 __pycache__/
 *.py[cod]
+uv.lock
+
+# Temp folder
+.temp/
 
 # Statusline debug dump (STATUSLINE_DEBUG=1)
 _last_payload.json
