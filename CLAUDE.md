@@ -16,6 +16,21 @@ then gamut-mapped to sRGB truecolor escapes.
 > syntax error degrades the status line to the literal fallback text `claude` (see the
 > top-level `try/except` in `main()`), so verify a run before considering a change done.
 
+## Docs & staying current
+
+The behaviour of this script is entirely dictated by the **JSON payload Claude Code
+feeds it**, and that payload gains fields over time. Don't trust memory — check:
+
+- [`docs/payload-schema.md`](docs/payload-schema.md) — every payload field, which ones
+  the script uses, behaviour notes, and **how to refresh** (official docs URLs + the
+  `STATUSLINE_DEBUG=1` capture trick).
+- [`docs/ultracode-detection.md`](docs/ultracode-detection.md) — the ultracode/xhigh
+  distinction, the current (unverified) detection, and how to verify it.
+
+To get authoritative, up-to-date Claude Code facts, dispatch the **`claude-code-guide`**
+subagent (it can `WebFetch`/`WebSearch` the official docs) or read
+<https://code.claude.com/docs/en/statusline> and `.../model-config` directly.
+
 ## Commands
 
 ```sh
@@ -59,12 +74,28 @@ hashable. Every bar carries a subtle left→right lightness gradient via `_slope
 On **API billing**, there are no rate-limit bars and the cost bar shows real
 `cost.total_cost_usd` (only when `> 0`).
 
-### Ultracode detection (intentional quirk)
-The payload never reports `ultracode`; it reports `effort.level == "xhigh"`. As a proxy,
-`main()` upgrades `xhigh` → `ultracode` when `workflows_enabled(data)` is true.
-`workflows_enabled()` reads the persistent `disableWorkflows` setting from
-`settings.json` files (user → project → local, more specific wins) — it does **not** see the
-live session-only `/effort ultracode` toggle. Treat this as best-effort, not exact.
+### Ultracode detection — impossible to detect; "wx" proxy instead
+Official docs (verified 2026-06-17): *"Ultracode is not a distinct level and reports as
+`xhigh`."* It is **session-only** — not in any `settings.json`, no env var, not on disk —
+so **nothing the status line can read distinguishes ultracode from plain `xhigh`**. The
+effort segment in `main()` therefore does three things, in order:
+1. **`ultracode` (letter `u`)** — dormant, future-proof hook (`eff.get("ultracode") is True`),
+   off today; lights up the genuine bar if Claude Code ever exposes a real field.
+2. **`wx` (letter `wx`)** — honest proxy: when `effort == "xhigh"` **and**
+   `workflows_enabled()`, show a full deep-purple bar (same look as old ultracode). Since
+   workflows are a *precondition* for ultracode, this truthfully means "ultracode is
+   *possible* this session" — it does **not** claim it's active.
+3. Otherwise render `effort.level` as-is.
+
+`workflows_enabled()` reads the documented signals (`CLAUDE_CODE_DISABLE_WORKFLOWS` env +
+`disableWorkflows` setting, user→project→local). Full write-up + citations:
+[`docs/ultracode-detection.md`](docs/ultracode-detection.md).
+
+> **Never label the xhigh+workflows state "ultracode".** That earlier mistake claimed
+> ultracode was *active* when it usually wasn't — the fix was the **label** (`wx`), not the
+> signal. Also dead: `session_name == "ultracode"` — the purple TUI label is Claude Code's
+> effort indicator drawn in the name slot, **not** the payload's `session_name` (upstream
+> bug [#63899](https://github.com/anthropics/claude-code/issues/63899)).
 
 ## Editing conventions
 

@@ -69,9 +69,13 @@ FIXED_HEX = "#10475D"   # brand colour for model / directory bars
 # Effort level -> its own colour (own gradient, NOT the green->red ramp).
 # Each entry: ("solid", (L, C, H))  -> subtle left->right lightness gradient
 #             ("rainbow", None)     -> hue sweep across the whole bar
-# NOTE: ultracode is NOT exposed in the statusline payload; it reports as
-#       "xhigh" (per Claude Code docs). The deeppurple entry is therefore
-#       future-proofing and will not trigger today.
+# Two non-payload pseudo-levels share the deep-purple, always-full look:
+#   "ultracode" -- the REAL thing, kept ready for the day Claude Code exposes a
+#                  detectable signal (letter "u"); does not trigger today.
+#   "wx"        -- our honest proxy: xhigh + dynamic workflows enabled (letter
+#                  "wx"). Workflows are a *precondition* for ultracode, so this
+#                  says "ultracode is possible this session", not "it's on".
+# See main() and docs/ultracode-detection.md.
 EFFORT_COLORS = {
     "low":       ("solid",   (0.68, 0.15,  60.0)),   # orange
     "medium":    ("solid",   (0.66, 0.14, 150.0)),   # green
@@ -79,13 +83,15 @@ EFFORT_COLORS = {
     "xhigh":     ("solid",   (0.75, 0.11, 322.0)),   # light purple
     "max":       ("rainbow", None),                  # rainbow
     "ultracode": ("solid",   (0.35, 0.16, 308.0)),   # deep purple
+    "wx":        ("solid",   (0.35, 0.16, 308.0)),   # deep purple (same look)
 }
-# Single-letter code shown in the effort bar (" <icon>  <x> ").
+# Code shown in the effort bar (" <icon>  <code> "); usually one letter, "wx" two.
 EFFORT_LETTER = {
     "low": "l", "medium": "m", "high": "h",
-    "xhigh": "x", "max": "m", "ultracode": "u",
+    "xhigh": "x", "max": "m", "ultracode": "u", "wx": "wx",
 }
-# Fill order: low fills 1/6 ... ultracode fills 6/6.
+# Fill order: low fills 1/6 ... ultracode fills 6/6. Pseudo-levels NOT listed
+# here (e.g. "wx") are rendered fully filled by effort_bar().
 EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultracode"]
 
 
@@ -262,11 +268,21 @@ def _read_json(path):
 
 
 def workflows_enabled(data):
-    """Best-available proxy for 'workflows enabled': the persistent
-    `disableWorkflows` setting (user -> project -> local, more specific wins).
-    The session-only `/effort ultracode` flag is NOT exposed to the statusline,
-    so this reads the settings files instead. Default: workflows enabled."""
+    """Best-effort: are dynamic workflows enabled? Used ONLY to label the effort
+    bar "wx" (xhigh + workflows). Workflows are a precondition for ultracode
+    (when disabled, ultracode is removed from the /effort menu), so this is the
+    closest readable proxy -- it does NOT prove ultracode is active.
+
+    Sources Claude Code documents (https://code.claude.com/docs/en/workflows):
+    `CLAUDE_CODE_DISABLE_WORKFLOWS=1` and the `disableWorkflows` setting (default
+    false) at user -> project -> local; more specific wins, settings override the
+    env var. Default: enabled. Caveat: we cannot see plan-level availability
+    (Pro defaults workflows off until enabled in /config), so this can be wrong
+    on Pro."""
     disabled = False
+    env = os.environ.get("CLAUDE_CODE_DISABLE_WORKFLOWS")
+    if env is not None:
+        disabled = env.strip().lower() in ("1", "true", "yes")
     home = os.path.expanduser("~")
     proj = ((data.get("workspace") or {}).get("project_dir")
             or data.get("cwd") or os.getcwd())
@@ -338,11 +354,24 @@ def main():
     rate  = data.get("rate_limits", {}) or {}
     # No subscription rate-limits in the payload => running on API billing.
     is_api = not rate
-    effort = (data.get("effort") or {}).get("level")
-    # Ultracode == xhigh effort + workflows enabled. The live session flag is
-    # not exposed to the statusline, so use the persistent workflow setting.
-    if effort == "xhigh" and workflows_enabled(data):
+    eff = data.get("effort") or {}
+    effort = eff.get("level")
+    # Real ultracode CANNOT be detected from a status line (verified 2026-06-17):
+    # the payload carries effort only as `effort.level`, and "Ultracode is not a
+    # distinct level and reports as xhigh." It is session-only and not on disk;
+    # the purple "ultracode" in the TUI is Claude Code's own effort indicator
+    # drawn where the session name goes (anthropics/claude-code #63899), NOT the
+    # payload's `session_name`. See docs/ultracode-detection.md.
+    #   * If Claude Code ever exposes a real flag -> the first branch lights up
+    #     the genuine "ultracode" bar (letter "u").
+    #   * Until then, surface the honest proxy "wx" (xhigh + workflows enabled).
+    #     Workflows are a precondition for ultracode, so "wx" == "ultracode is
+    #     possible this session" -- a full deep-purple bar like the old look,
+    #     but labelled truthfully rather than claiming ultracode is active.
+    if eff.get("ultracode") is True:                       # absent in payloads today
         effort = "ultracode"
+    elif effort == "xhigh" and workflows_enabled(data):
+        effort = "wx"
 
     ctx_size = cw.get("context_window_size", 200_000) or 200_000
     used_pct = cw.get("used_percentage")

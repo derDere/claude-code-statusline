@@ -116,8 +116,8 @@ Use an **absolute path** (Windows accepts forward slashes, e.g.
 
 ### Effort levels
 
-The effort bar fills from `1/6` (low) to `6/6` (ultracode) and uses its own colour
-per level — independent of the green→red progress ramp:
+The effort bar fills from `1/6` (low) to `6/6` and uses its own colour per level —
+independent of the green→red progress ramp:
 
 | Level | Fill | Letter | Colour |
 |---|---|---|---|
@@ -127,9 +127,12 @@ per level — independent of the green→red progress ramp:
 | `xhigh` | 4/6 | `x` | light purple |
 | `max` | 5/6 | `m` | rainbow |
 | `ultracode` | 6/6 | `u` | deep purple |
+| `wx` *(derived)* | full | `wx` | deep purple |
 
 > `medium` and `max` share the letter `m`; they are easily told apart by colour
-> and fill level.
+> and fill level. **`wx`** is not a level you set — it's a derived indicator
+> (`xhigh` + dynamic workflows enabled); see [Ultracode detection](#ultracode-detection).
+> **`ultracode`** cannot currently be detected and so never renders today (see below).
 
 ---
 
@@ -140,7 +143,7 @@ All knobs live near the top of `statusline.py`:
 - `RAMP` — the four OKLCH stops of the green→yellow→orange→red progress ramp.
 - `COST_GREEN` / `COST_RED` — dollar thresholds where the cost bar is fully green / red.
 - `EFFORT_COLORS` — per-level colour (or `rainbow`) for the effort bar.
-- `EFFORT_LETTER` — the single-letter code shown per effort level.
+- `EFFORT_LETTER` — the short code shown per effort level (usually one letter; `wx` is two).
 - `DL_FILL` / `DL_FIXED` — strength of the left→right lightness gradient.
 - `L_EMPTY` / `C_EMPTY` — lightness/chroma of the empty bar track.
 - `FIXED_HEX` — brand colour of the fixed (model / directory) bars.
@@ -160,13 +163,20 @@ estimate of the session's worth.
 
 ### Ultracode detection
 
-Claude Code does **not** expose "ultracode" in the status-line payload — it
-reports as `effort.level == "xhigh"`. As a best-available proxy, this script
-treats `xhigh` **+ workflows enabled** as ultracode, reading the persistent
-`disableWorkflows` setting (user → project → local; more specific wins) to decide
-whether workflows are enabled. The live, session-only `/effort ultracode` toggle
-is not visible to the status line, so `xhigh` with workflows enabled always
-renders as ultracode.
+Claude Code does **not** expose "ultracode" in the status-line payload — per the
+[docs](https://code.claude.com/docs/en/statusline) it reports as
+`effort.level == "xhigh"`, and ultracode is a session-only setting that lives in no
+file, env var, or payload field a status line can read. **So ultracode cannot be
+detected**, and the genuine `ultracode` bar (letter `u`) is a dormant hook that only
+lights up if Claude Code ever adds a real signal.
+
+As an honest stand-in, when effort is `xhigh` **and** dynamic workflows are enabled the
+bar shows **`wx`** (a full deep-purple bar). Since workflows are a *precondition* for
+ultracode (disabling them removes `ultracode` from the `/effort` menu), `wx` means
+"xhigh + workflows on, so ultracode is *possible* this session" — not a claim that it's
+active. Workflow state is read from `CLAUDE_CODE_DISABLE_WORKFLOWS` and the
+`disableWorkflows` setting (user → project → local; more specific wins). See
+[`docs/ultracode-detection.md`](docs/ultracode-detection.md) for the full reasoning.
 
 ---
 
