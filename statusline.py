@@ -28,6 +28,7 @@ import sys
 import io
 import json
 import os
+import subprocess
 from functools import lru_cache
 
 from coloraide import Color
@@ -311,6 +312,71 @@ def get_cwd():
     return cwd
 
 
+# ── Terminal capability check ─────────────────────────────────────────────────
+# Every colour here is a 24-bit escape. A terminal limited to the 8/16 legacy
+# ANSI colours rounds all of them onto that palette, so the bars keep their
+# shape but lose their meaning -- a silently wrong status line. When that is
+# detected, the whole line is replaced by the banner below.
+DOC_URL = ("https://github.com/derDere/claude-code-statusline"
+           "/blob/main/docs/terminal-truecolor.md")
+
+# Legacy SGR (bold / red background / bright white) instead of 24-bit escapes,
+# so the banner renders correctly in exactly the terminals it warns about.
+ERR_SGR = "\033[1;41;97m"
+
+
+def _tmux_termfeatures() -> set[str] | None:
+    """Terminal features tmux negotiated for the attached client, or None.
+
+    `tmux display-message -p '#{client_termfeatures}'` is the authoritative
+    answer: it lists what tmux will actually emit (e.g. "256,RGB,title").
+    `tmux info` is not usable for this -- it reports the terminfo entry of the
+    outer terminal type and keeps showing `RGB: [missing]` even when
+    `terminal-features` / `terminal-overrides` granted RGB.
+
+    Returns None when tmux cannot be asked at all (missing binary, dead server,
+    timeout), which the caller treats as "no evidence", not as a failure.
+    """
+    try:
+        out = subprocess.run(["tmux", "display-message", "-p",
+                              "#{client_termfeatures}"],
+                             capture_output=True, text=True, timeout=1.0)
+        if out.returncode != 0:
+            return None
+        return {f.strip() for f in out.stdout.strip().split(",") if f.strip()}
+    except Exception:
+        return None
+
+
+def truecolor_problem() -> str | None:
+    """Short reason why 24-bit colour is unavailable, or None if it is fine.
+
+    Deliberately conservative: anything undecidable counts as fine, so the
+    banner never cries wolf. Inside tmux, tmux is the component that downgrades
+    colours and therefore the authority on what reaches the terminal; outside
+    tmux the convention is COLORTERM=truecolor|24bit or a `*-direct` terminfo
+    entry. See docs/terminal-truecolor.md.
+    """
+    try:
+        if os.environ.get("TMUX"):
+            feats = _tmux_termfeatures()
+            if feats is None:
+                return None                       # cannot ask tmux -> stay quiet
+            return None if "RGB" in feats else "tmux passes no RGB"
+        if os.environ.get("COLORTERM", "").strip().lower() in ("truecolor", "24bit"):
+            return None
+        if "direct" in os.environ.get("TERM", "").lower():
+            return None
+        return "COLORTERM is not truecolor"
+    except Exception:
+        return None
+
+
+def error_line(reason: str) -> str:
+    """Full-line red banner naming the problem and where its fix is documented."""
+    return f"{ERR_SGR} NO TRUECOLOR ({reason}) -> {DOC_URL} {RESET}"
+
+
 # ── Icons (Nerd Font) ─────────────────────────────────────────────────────────
 ICON_DIR   = chr(0xF07C)   # nf-fa-folder_open
 ICON_MODEL = chr(0xF489)   # nf-dev-terminal
@@ -347,6 +413,13 @@ def main():
                 fh.write(raw)
     except Exception:
         pass
+
+    # A terminal without 24-bit colour turns every bar into a lie -> say so
+    # instead of rendering a status line that cannot be trusted.
+    problem = truecolor_problem()
+    if problem:
+        sys.stdout.write(error_line(problem) + "\n")
+        return
 
     mid   = data.get("model", {}).get("id", "")
     mname = data.get("model", {}).get("display_name", mid)

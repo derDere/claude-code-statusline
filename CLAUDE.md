@@ -26,6 +26,8 @@ feeds it**, and that payload gains fields over time. Don't trust memory — chec
   `STATUSLINE_DEBUG=1` capture trick).
 - [`docs/ultracode-detection.md`](docs/ultracode-detection.md) — the ultracode/xhigh
   distinction, the current (unverified) detection, and how to verify it.
+- [`docs/terminal-truecolor.md`](docs/terminal-truecolor.md) — why the line needs
+  24-bit colour, how the check decides, and the tmux/SSH fixes the red banner points at.
 
 To get authoritative, up-to-date Claude Code facts, dispatch the **`claude-code-guide`**
 subagent (it can `WebFetch`/`WebSearch` the official docs) or read
@@ -52,9 +54,18 @@ new/changed payload fields.
 
 ## Architecture
 
-**Data flow** (`main()`): read stdin → `json.loads` → pull fields → append segment strings to
-a `segs` list in fixed order → join with the diamond separator → write one line. Segment order:
-context · 5h · 7d · cost · model · effort · directory.
+**Data flow** (`main()`): read stdin → `json.loads` → truecolor gate → pull fields → append
+segment strings to a `segs` list in fixed order → join with the diamond separator → write one
+line. Segment order: context · 5h · 7d · cost · model · effort · directory.
+
+**Truecolor gate:** `truecolor_problem()` runs before any segment is built. Inside tmux it asks
+`tmux display-message -p '#{client_termfeatures}'` for `RGB` (authoritative — `tmux info` is
+**not**, it reports the outer terminfo entry and misses RGB granted via `terminal-features`);
+outside tmux it accepts `COLORTERM=truecolor|24bit` or a `*-direct` `TERM`. Anything undecidable
+counts as fine, so the banner never fires without evidence. On a hit, `error_line()` replaces the
+whole status line with one red `NO TRUECOLOR (<reason>) -> <DOC_URL>` banner drawn in **legacy
+SGR** (`1;41;97`), not 24-bit escapes — it has to be readable in the very terminals it warns
+about. Keep `DOC_URL` pointing at `docs/terminal-truecolor.md` on `main`.
 
 **Three segment builders**, all ending in `_wrap()` (which adds the pointy Powerline end-caps):
 - `bar(icon, text, pct, …)` — fill bar whose **hue** comes from `pct` via `RAMP` and whose

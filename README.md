@@ -27,10 +27,36 @@ from `https://github.com/derDere/claude-code-statusline`, do exactly this:**
      }
    }
    ```
-4. **Tell the user** they need a **[Nerd Font](https://www.nerdfonts.com/)** in
-   their terminal and **24-bit true-colour** support, otherwise the glyphs/colours
-   won't render.
-5. *(Optional)* verify it runs:
+4. **Check 24-bit colour and repair it** — do not just mention it. Without
+   truecolor the status line renders nothing but a red `NO TRUECOLOR …` banner,
+   so verify the terminal the user is actually sitting in:
+   - **Inside tmux** (`$TMUX` is set): `tmux display-message -p '#{client_termfeatures}'`
+     must list `RGB`. If it does not, add the block below to the user's
+     **`~/.tmux.conf`** (tmux reads only `~/.tmux.conf` or
+     `~/.config/tmux/tmux.conf` — a file named `~/.tmuxrc` is silently ignored,
+     which is a common reason correct settings appear to do nothing):
+     ```tmux
+     set -g default-terminal "tmux-256color"
+     set -as terminal-features ",xterm*:RGB:256"
+     set -as terminal-features ",screen*:RGB:256"
+     set -ga terminal-overrides ",xterm*:Tc"
+     setenv -g COLORTERM truecolor
+     set -ga update-environment " COLORTERM"
+     ```
+     Then **tell the user to detach (`prefix` + `d`) and run `tmux attach` again** —
+     tmux fixes a client's colour capabilities at attach time, so `source-file`
+     alone changes nothing. The session and everything in it survive a re-attach.
+   - **Outside tmux**: `COLORTERM` must be `truecolor` or `24bit` (or `TERM` must
+     be a `*-direct` entry). Otherwise add `export COLORTERM=truecolor` to the
+     user's shell profile.
+   - **SSH clients that announce plain `xterm`** (Termius on iOS does) are the
+     usual root cause; setting the client's terminal type to `xterm-256color`
+     fixes it at the source.
+
+   Full write-up: [`docs/terminal-truecolor.md`](docs/terminal-truecolor.md).
+5. **Tell the user** they need a **[Nerd Font](https://www.nerdfonts.com/)** in
+   their terminal, otherwise the glyphs won't render.
+6. *(Optional)* verify it runs:
    ```sh
    echo '{"model":{"id":"claude-opus-4-8","display_name":"Opus 4.8"},"context_window":{"context_window_size":1000000,"used_percentage":20},"rate_limits":{"five_hour":{"used_percentage":10}}}' | uvx --from git+https://github.com/derDere/claude-code-statusline.git claude-code-statusline
    ```
@@ -177,6 +203,25 @@ ultracode (disabling them removes `ultracode` from the `/effort` menu), `wx` mea
 active. Workflow state is read from `CLAUDE_CODE_DISABLE_WORKFLOWS` and the
 `disableWorkflows` setting (user → project → local; more specific wins). See
 [`docs/ultracode-detection.md`](docs/ultracode-detection.md) for the full reasoning.
+
+### The red `NO TRUECOLOR` banner
+
+Every colour here is a 24-bit escape, and a terminal limited to the 8/16 legacy
+ANSI colours rounds all of them onto that palette — the bars keep their shape but
+lose their meaning. Rather than show a status line whose colours lie, the script
+checks for truecolor on each render and, when it is missing, replaces the entire
+line with a red banner naming the cause and linking the fix:
+
+```
+ NO TRUECOLOR (tmux passes no RGB) -> https://github.com/derDere/claude-code-statusline/blob/main/docs/terminal-truecolor.md
+```
+
+Inside tmux the verdict comes from `tmux display-message -p '#{client_termfeatures}'`
+(must contain `RGB`); outside tmux from `COLORTERM` being `truecolor`/`24bit` or
+`TERM` being a `*-direct` entry. Anything undecidable counts as fine, so the
+banner never appears without cause. The fixes — most often a missing
+`~/.tmux.conf` plus a re-attach — are in
+[`docs/terminal-truecolor.md`](docs/terminal-truecolor.md).
 
 ---
 
