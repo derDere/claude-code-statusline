@@ -19,20 +19,41 @@ The banner is drawn with the legacy SGR codes `1;41;97` (bold, red background,
 bright white text) rather than 24-bit escapes, so it renders correctly in exactly
 the degraded terminals it warns about.
 
+The check runs once the session has produced its first API response. During the
+startup window before that, the script prints its startup line, which uses the same
+legacy colours and needs no verdict about the terminal to be correct.
+
 ## How the check decides
 
-`truecolor_problem()` in `statusline.py` returns a short reason string, or `None`
-when everything is fine. It is deliberately conservative — anything it cannot
-decide counts as fine, so the banner never cries wolf.
+`detect_color_caps()` in `statusline.py` measures the terminal once per render and
+returns a `ColorCaps` record, which `main()` stores in the module-level `COLOR`
+variable so the rest of the script can consult it:
+
+| Field | Meaning |
+|---|---|
+| `level` | `MONO` (0), `ANSI16` (1), `ANSI256` (2) or `TRUECOLOR` (3) — the best colour depth the terminal is believed to handle |
+| `certain` | whether `level` was measured, or assumed because nothing could be measured |
+| `reason` | short text naming why `level` is below `TRUECOLOR`, or `None` |
+
+The banner appears only when `certain` is true **and** `level` is below
+`TRUECOLOR`. Anything undecidable is recorded as truecolor with `certain = False`,
+so the banner never cries wolf.
 
 | Situation | Signal `statusline.py` reads | Verdict |
 |---|---|---|
-| `TMUX` is set | `tmux display-message -p '#{client_termfeatures}'` contains `RGB` | fine |
-| `TMUX` is set | the same query does **not** list `RGB` | banner: `tmux passes no RGB` |
-| `TMUX` is set, tmux cannot be queried | — | fine (no evidence either way) |
-| No tmux | `COLORTERM` is `truecolor` or `24bit` | fine |
-| No tmux | `TERM` contains `direct` (e.g. `xterm-direct`) | fine |
-| No tmux | none of the above | banner: `COLORTERM is not truecolor` |
+| `TMUX` is set | `tmux display-message -p '#{client_termfeatures}'` contains `RGB` | `TRUECOLOR`, measured — fine |
+| `TMUX` is set | the same query lists features but no `RGB` | `ANSI256`/`ANSI16`, measured — banner: `tmux passes no RGB` |
+| `TMUX` is set | the query cannot be answered, or comes back empty | `TRUECOLOR`, assumed — fine (no evidence either way) |
+| No tmux | `COLORTERM` is `truecolor` or `24bit` | `TRUECOLOR`, measured — fine |
+| No tmux | `TERM` contains `direct` (e.g. `xterm-direct`) | `TRUECOLOR`, measured — fine |
+| No tmux | `TERM` contains `256color` | `ANSI256`, measured — banner: `COLORTERM is not truecolor` |
+| No tmux | `TERM` is unset or `dumb` | `MONO`, measured — banner: `TERM is dumb` |
+| No tmux | none of the above | `ANSI16`, measured — banner: `COLORTERM is not truecolor` |
+
+An **empty** feature list counts as no evidence rather than as a missing `RGB`.
+tmux answers the query while a client is still attaching and has not finished
+negotiating features, and reading that silence as a negative would fire the banner
+on a terminal whose colours are perfectly fine.
 
 Inside tmux, tmux itself is the component that downgrades colours, so its own
 negotiated client features are the authoritative answer. Note that

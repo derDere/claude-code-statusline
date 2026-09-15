@@ -29,6 +29,8 @@ import io
 import json
 import os
 import subprocess
+from dataclasses import dataclass
+from enum import IntEnum
 from functools import lru_cache
 
 from coloraide import Color
@@ -312,11 +314,11 @@ def get_cwd():
     return cwd
 
 
-# ── Terminal capability check ─────────────────────────────────────────────────
+# ── Terminal colour capabilities ──────────────────────────────────────────────
 # Every colour here is a 24-bit escape. A terminal limited to the 8/16 legacy
 # ANSI colours rounds all of them onto that palette, so the bars keep their
 # shape but lose their meaning -- a silently wrong status line. When that is
-# detected, the whole line is replaced by the banner below.
+# detected *with certainty*, the whole line is replaced by the banner below.
 DOC_URL = ("https://github.com/derDere/claude-code-statusline"
            "/blob/main/docs/terminal-truecolor.md")
 
@@ -348,33 +350,147 @@ def _tmux_termfeatures() -> set[str] | None:
         return None
 
 
-def truecolor_problem() -> str | None:
-    """Short reason why 24-bit colour is unavailable, or None if it is fine.
+class ColorSupport(IntEnum):
+    """Colour depth a terminal can render, ordered worst to best."""
 
-    Deliberately conservative: anything undecidable counts as fine, so the
-    banner never cries wolf. Inside tmux, tmux is the component that downgrades
-    colours and therefore the authority on what reaches the terminal; outside
-    tmux the convention is COLORTERM=truecolor|24bit or a `*-direct` terminfo
-    entry. See docs/terminal-truecolor.md.
+    MONO = 0        #: no colour at all (TERM unset or "dumb")
+    ANSI16 = 1      #: the 8/16 legacy SGR colours
+    ANSI256 = 2     #: the indexed 256-colour palette
+    TRUECOLOR = 3   #: 24-bit RGB, what every bar in this script needs
+
+
+@dataclass(frozen=True)
+class ColorCaps:
+    """What the terminal receiving this render is believed to support.
+
+    @param level    Best colour depth the terminal is believed to handle.
+    @param certain  True when @p level was measured, False when it was assumed
+                    because nothing could be measured. Only a *certain* lack of
+                    truecolor may raise the banner; guessing would cry wolf.
+    @param reason   Short human-readable reason why @p level is below
+                    TRUECOLOR, or None when truecolor is available.
     """
+
+    level: ColorSupport
+    certain: bool
+    reason: str | None = None
+
+    @property
+    def truecolor(self) -> bool:
+        """Whether 24-bit escapes reach the terminal faithfully."""
+        return self.level >= ColorSupport.TRUECOLOR
+
+    @property
+    def banner_worthy(self) -> bool:
+        """Whether the bars must be replaced by the NO TRUECOLOR banner."""
+        return self.certain and not self.truecolor
+
+
+#: Colour capabilities of the terminal this process writes to. Assumed-truecolor
+#: until main() replaces it with the measured value, so importing this module
+#: never shells out to tmux and never blames a terminal it has not inspected.
+COLOR = ColorCaps(level=ColorSupport.TRUECOLOR, certain=False)
+
+
+def _term_level(term: str) -> ColorSupport:
+    """Colour depth implied by a TERM string, ignoring any truecolor hint.
+
+    Used only once truecolor has been ruled out, to record how much colour is
+    left rather than collapsing every shortfall to a single flag.
+    """
+    t = term.strip().lower()
+    if not t or t == "dumb":
+        return ColorSupport.MONO
+    return ColorSupport.ANSI256 if "256color" in t else ColorSupport.ANSI16
+
+
+def detect_color_caps() -> ColorCaps:
+    """Measure the terminal's colour depth, erring towards "it is fine".
+
+    Inside tmux, tmux is the component that downgrades colours and therefore the
+    authority on what reaches the terminal; outside tmux the convention is
+    COLORTERM=truecolor|24bit or a `*-direct` terminfo entry. Anything that
+    cannot be measured comes back as truecolor with @c certain=False, so the
+    banner never fires without evidence. See docs/terminal-truecolor.md.
+    """
+    assumed = ColorCaps(level=ColorSupport.TRUECOLOR, certain=False)
     try:
+        term = os.environ.get("TERM", "")
         if os.environ.get("TMUX"):
             feats = _tmux_termfeatures()
-            if feats is None:
-                return None                       # cannot ask tmux -> stay quiet
-            return None if "RGB" in feats else "tmux passes no RGB"
+            # No answer at all, or an answer given before tmux finished
+            # negotiating features with its client -- an empty list is routine
+            # while a client attaches. Neither is evidence of missing RGB.
+            if not feats:
+                return assumed
+            if "RGB" in feats:
+                return ColorCaps(level=ColorSupport.TRUECOLOR, certain=True)
+            level = ColorSupport.ANSI256 if "256" in feats else _term_level(term)
+            return ColorCaps(level=level, certain=True,
+                             reason="tmux passes no RGB")
         if os.environ.get("COLORTERM", "").strip().lower() in ("truecolor", "24bit"):
-            return None
-        if "direct" in os.environ.get("TERM", "").lower():
-            return None
-        return "COLORTERM is not truecolor"
+            return ColorCaps(level=ColorSupport.TRUECOLOR, certain=True)
+        if "direct" in term.lower():
+            return ColorCaps(level=ColorSupport.TRUECOLOR, certain=True)
+        level = _term_level(term)
+        reason = ("TERM is dumb" if level is ColorSupport.MONO
+                  else "COLORTERM is not truecolor")
+        return ColorCaps(level=level, certain=True, reason=reason)
     except Exception:
-        return None
+        return assumed
 
 
-def error_line(reason: str) -> str:
+def error_line(reason: str | None) -> str:
     """Full-line red banner naming the problem and where its fix is documented."""
-    return f"{ERR_SGR} NO TRUECOLOR ({reason}) -> {DOC_URL} {RESET}"
+    why = reason or "no 24-bit colour"
+    return f"{ERR_SGR} NO TRUECOLOR ({why}) -> {DOC_URL} {RESET}"
+
+
+# ── Startup line ──────────────────────────────────────────────────────────────
+# Shown before anything about the session or the terminal has been established,
+# so it is deliberately the plainest thing this script can draw: the 8/16 legacy
+# SGR colours and plain ASCII only -- no 24-bit escapes, no Nerd Font glyphs, no
+# Powerline end-caps. It stays readable on a monochrome terminal.
+STARTUP_SGR = "\033[44;97m"   # blue background, bright white text
+STARTUP_TEXT = "starting..."
+STARTUP_SEP = " | "
+
+
+def is_starting(data) -> bool:
+    """Whether the session has not produced a single API response yet.
+
+    Until it has, the payload is still filling in, and bars built on it would
+    lie: `rate_limits` may not have arrived on a subscription (which reads as
+    API billing and shows an estimated cost that was never spent), and tmux may
+    not have finished negotiating colours.
+
+    `context_window.current_usage` is null before the first API call *and* after
+    /compact, so the token counters are checked too: after a compaction they are
+    non-zero and the session is not starting.
+    """
+    cw = data.get("context_window") or {}
+    if cw.get("current_usage") is not None:
+        return False
+    if cw.get("used_percentage"):
+        return False
+    if cw.get("total_input_tokens"):
+        return False
+    return True
+
+
+def startup_line(data) -> str:
+    """The line shown until real data arrives, holding only what is trustworthy.
+
+    This early, the model and the working directory are already correct while
+    every measured value is not, so those two are shown next to a plain
+    "starting..." block and nothing else is claimed.
+    """
+    model = data.get("model") or {}
+    mid = model.get("id") or ""
+    blocks = [STARTUP_TEXT,
+              model_label(mid, model.get("display_name") or mid),
+              get_cwd()]
+    return STARTUP_SEP.join(f"{STARTUP_SGR} {b} {RESET}" for b in blocks if b)
 
 
 # ── Icons (Nerd Font) ─────────────────────────────────────────────────────────
@@ -414,11 +530,18 @@ def main():
     except Exception:
         pass
 
+    # Before the first API response the payload is still filling in. Announce
+    # that plainly instead of drawing bars over fields that have not arrived.
+    if is_starting(data):
+        sys.stdout.write(startup_line(data) + "\n")
+        return
+
     # A terminal without 24-bit colour turns every bar into a lie -> say so
     # instead of rendering a status line that cannot be trusted.
-    problem = truecolor_problem()
-    if problem:
-        sys.stdout.write(error_line(problem) + "\n")
+    global COLOR
+    COLOR = detect_color_caps()
+    if COLOR.banner_worthy:
+        sys.stdout.write(error_line(COLOR.reason) + "\n")
         return
 
     mid   = data.get("model", {}).get("id", "")
@@ -475,6 +598,8 @@ def main():
 
     # 4. Real cost — only on API billing (no subscription rate-limits) and > 0.
     #    On a subscription, cost.total_cost_usd is just an estimate -> hide it.
+    #    is_api only means anything past the startup gate above: an early payload
+    #    has no rate_limits yet and would read as API billing.
     if is_api and cost is not None and cost > 0:
         cstr = "<$0.01" if cost < 0.01 else f"${cost:.2f}"
         segs.append(bar("", cstr, cost_pct(cost), min_width=8, alwaysfill=True))

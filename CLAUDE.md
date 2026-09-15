@@ -54,15 +54,33 @@ new/changed payload fields.
 
 ## Architecture
 
-**Data flow** (`main()`): read stdin → `json.loads` → truecolor gate → pull fields → append
-segment strings to a `segs` list in fixed order → join with the diamond separator → write one
-line. Segment order: context · 5h · 7d · cost · model · effort · directory.
+**Data flow** (`main()`): read stdin → `json.loads` → **startup gate** → truecolor gate → pull
+fields → append segment strings to a `segs` list in fixed order → join with the diamond
+separator → write one line. Segment order: context · 5h · 7d · cost · model · effort · directory.
 
-**Truecolor gate:** `truecolor_problem()` runs before any segment is built. Inside tmux it asks
+**Startup gate:** `is_starting(data)` is true while the session has produced no API response
+yet — `context_window.current_usage` is `null` **and** `used_percentage` and
+`total_input_tokens` are both empty (`/compact` also nulls `current_usage` but leaves the
+counters non-zero, so it does not re-enter the window). In that window `startup_line(data)`
+replaces the whole line with `starting... | <model> | <cwd>`, drawn in **legacy SGR**
+(`STARTUP_SGR`) with plain ASCII — no 24-bit escapes, no Nerd Font glyphs, no `_wrap()` caps —
+because nothing is yet known about what the terminal can render. It shows only the model and
+the directory, the two fields that are already correct that early. This gate is what keeps a
+half-filled payload from being rendered as bars; it runs **before** the truecolor gate so a
+tmux client that is still attaching cannot produce a banner.
+
+**Truecolor gate:** `detect_color_caps()` runs before any segment is built and its result lands
+in the module-level `COLOR` variable (a frozen `ColorCaps`: a `ColorSupport` level —
+`MONO`/`ANSI16`/`ANSI256`/`TRUECOLOR` — plus `certain` and `reason`). `COLOR` defaults to
+assumed-truecolor at import, so importing the module never shells out. Inside tmux it asks
 `tmux display-message -p '#{client_termfeatures}'` for `RGB` (authoritative — `tmux info` is
 **not**, it reports the outer terminfo entry and misses RGB granted via `terminal-features`);
-outside tmux it accepts `COLORTERM=truecolor|24bit` or a `*-direct` `TERM`. Anything undecidable
-counts as fine, so the banner never fires without evidence. On a hit, `error_line()` replaces the
+outside tmux it accepts `COLORTERM=truecolor|24bit` or a `*-direct` `TERM`, and otherwise reads
+the depth left over from `TERM`. Anything undecidable — **including an empty tmux feature list,
+which just means the client is still attaching** — is recorded as truecolor with
+`certain=False`. The banner needs `COLOR.banner_worthy`, i.e. a *measured* shortfall, so it
+never fires without evidence. Nothing renders differently per level yet; the levels exist so
+future colour work has something real to branch on. On a hit, `error_line()` replaces the
 whole status line with one red `NO TRUECOLOR (<reason>) -> <DOC_URL>` banner drawn in **legacy
 SGR** (`1;41;97`), not 24-bit escapes — it has to be readable in the very terminals it warns
 about. Keep `DOC_URL` pointing at `docs/terminal-truecolor.md` on `main`.
@@ -84,6 +102,13 @@ hashable. Every bar carries a subtle left→right lightness gradient via `_slope
 5h/7d bars render and the cost bar is **hidden** (Claude Code reports only an *estimate* there).
 On **API billing**, there are no rate-limit bars and the cost bar shows real
 `cost.total_cost_usd` (only when `> 0`).
+
+`is_api` is only meaningful past the startup gate: an early payload has no `rate_limits` yet
+and would read as API billing, showing a subscription's *estimated* cost as if it had been
+spent. The gate's early return is what prevents that — the cost condition itself needs no extra
+clause. One race survives: a first API response arriving before the rate limits do can still
+show an estimated cost for a single render, and the payload carries no positive "this is API
+billing" field with which to close it.
 
 ### Ultracode detection — impossible to detect; "wx" proxy instead
 Official docs (verified 2026-06-17): *"Ultracode is not a distinct level and reports as

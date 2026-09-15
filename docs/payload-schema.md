@@ -34,7 +34,7 @@ payload but not yet used.
 | `context_window.remaining_percentage` | number | % of context remaining | [avail] |
 | `context_window.total_input_tokens` | number | Input tokens in context (incl. cache) | [used]² |
 | `context_window.total_output_tokens` | number | Output tokens of last response | [avail] |
-| `context_window.current_usage` | object\|null | Token counts by category; `null` before first API call and after `/compact` | [avail] |
+| `context_window.current_usage` | object\|null | Token counts by category; `null` before first API call and after `/compact` | [used]⁴ |
 | `exceeds_200k_tokens` | boolean | Whether total tokens passed the fixed 200k mark | [avail] |
 | `effort.level` | string | `low`\|`medium`\|`high`\|`xhigh`\|`max`. **Absent** if the model has no effort param. Reflects live `/effort` changes | [used] |
 | `thinking.enabled` | boolean | Extended thinking on/off | [avail] |
@@ -58,12 +58,24 @@ payload but not yet used.
 ² Only as a fallback: `used_tok = ctx_size * used_pct/100` when `used_percentage` is
   present, else `total_input_tokens`.
 ³ Shown **only on API billing** — see the cost note below.
+⁴ Together with `used_percentage` and `total_input_tokens`, to decide whether the
+  session has produced its first API response yet — see the startup note below.
 
 ## Behaviour notes baked into the script
 
+- **Startup window.** Before the first API response the payload is still filling in,
+  and `main()` renders a plain startup line instead of bars over absent fields.
+  `is_starting()` detects it: `current_usage` is `null` **and** `used_percentage` and
+  `total_input_tokens` are both empty. `/compact` also nulls `current_usage` but leaves
+  the token counters non-zero, so it does not re-enter the window.
 - **Billing mode** is inferred, not given: `is_api = not rate_limits`. Subscription
   payloads contain `rate_limits` (→ show 5h/7d bars, **hide** cost, since cost is only
   an estimate there); API payloads have none (→ show the real cost bar when `> 0`).
+  The inference only holds past the startup window: an early payload has no
+  `rate_limits` yet and would otherwise read as API billing and show a subscription's
+  estimated cost. One race is left uncovered — a first API response arriving before the
+  rate limits do can still show an estimated cost for a single render, and the payload
+  carries no positive "this is API billing" field with which to close it.
 - **Absent vs null:** many fields are simply missing rather than `null`. Use
   `(data.get(x) or {}).get(y)` patterns, never assume presence.
 
