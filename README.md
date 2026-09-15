@@ -175,7 +175,8 @@ All knobs live near the top of `statusline.py`:
 - `FIXED_HEX` — brand colour of the fixed (model / directory) bars.
 - `ICON_*` — glyph codepoints (swap these if your Nerd Font differs).
 - `STARTUP_SGR` / `STARTUP_TEXT` / `STARTUP_SEP` — the legacy-colour escape, wording and
-  separator of the startup line (see [The startup line](#the-startup-line)).
+  separator of the startup line (see [The startup line](#the-startup-line)). `40;37` is
+  grey on black; `40;90` is dimmer, `40;97` brighter.
 
 ---
 
@@ -190,15 +191,15 @@ would state things that are not true — most visibly a dollar figure restored f
 earlier runs — so for that window the script prints a plain startup line instead:
 
 ```
- starting...  |  Opus 5  |  ~/sources/claude-code-statusline
+ starting... | Opus 5 | ~/sources/claude-code-statusline
 ```
 
 Only the model and the working directory appear, because only those are already
-correct that early. The line is drawn with the 8/16 legacy ANSI colours and plain
-ASCII — no 24-bit escapes, no Nerd Font glyphs, no Powerline end-caps — so it stays
-readable even on a monochrome terminal, before anything is known about what the
-terminal can render. The full bar takes over on the first render after an API
-response.
+correct that early. It is drawn in grey on black so it stays out of the way, using
+the 8/16 legacy ANSI colours and plain ASCII — no 24-bit escapes, no Nerd Font glyphs,
+no Powerline end-caps — so it stays readable even on a monochrome terminal, before
+anything is known about what the terminal can render. The full bar takes over once
+you send your first prompt.
 
 The window is detected from `prompt_id`, which Claude Code omits until your first
 input. The token counters cannot detect it: a resumed session restores them (they reset

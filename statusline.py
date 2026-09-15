@@ -452,7 +452,7 @@ def error_line(reason: str | None) -> str:
 # so it is deliberately the plainest thing this script can draw: the 8/16 legacy
 # SGR colours and plain ASCII only -- no 24-bit escapes, no Nerd Font glyphs, no
 # Powerline end-caps. It stays readable on a monochrome terminal.
-STARTUP_SGR = "\033[44;97m"   # blue background, bright white text
+STARTUP_SGR = "\033[40;37m"   # black background, grey text -- deliberately quiet
 STARTUP_TEXT = "starting..."
 STARTUP_SEP = " | "
 
@@ -487,7 +487,8 @@ def startup_line(data) -> str:
     blocks = [STARTUP_TEXT,
               model_label(mid, model.get("display_name") or mid),
               get_cwd()]
-    return STARTUP_SEP.join(f"{STARTUP_SGR} {b} {RESET}" for b in blocks if b)
+    body = STARTUP_SEP.join(b for b in blocks if b)
+    return f"{STARTUP_SGR} {body} {RESET}"
 
 
 # ── Icons (Nerd Font) ─────────────────────────────────────────────────────────
