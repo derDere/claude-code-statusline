@@ -28,8 +28,10 @@ import sys
 import io
 import json
 import os
+import re
 import subprocess
 import time
+import unicodedata
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import lru_cache
@@ -511,6 +513,143 @@ def cost_pct(cost):
     return _clamp((cost - COST_GREEN) / (COST_RED - COST_GREEN) * 100.0, 0.0, 100.0)
 
 
+# ── Marquee: scrolling a line that is wider than the terminal ─────────────────
+SCROLL_SPEED  = 6.0   # visible cells travelled per second
+SCROLL_HOLD   = 2.0   # seconds the line rests at each end before turning back
+SCROLL_MARGIN = 0     # cells kept free on the right (room for notifications)
+
+#: Every escape this script emits is an SGR (colour) sequence.
+_SGR = re.compile(r"\033\[[0-9;]*m")
+
+
+def _char_cells(ch: str) -> int:
+    """How many terminal cells one character occupies.
+
+    Combining marks ride on the previous glyph and take no width of their own;
+    East-Asian wide and fullwidth characters take two. Nerd Font glyphs live in
+    the private use areas, which report neither -- they render single-width in
+    the Mono variants this status line is built for.
+    """
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def visible_width(s: str) -> int:
+    """Width of a rendered line in terminal cells, ignoring colour escapes."""
+    return sum(_char_cells(c) for c in _SGR.sub("", s))
+
+
+def _slice_cells(s: str, start: int, count: int) -> str:
+    """Cut `count` visible cells out of `s`, starting at cell `start`.
+
+    A plain string slice cannot do this: the rendered line is mostly colour
+    escapes (roughly 3900 bytes carry 124 visible cells), so slicing by index
+    would cut an escape in half and would also drop every colour set before the
+    window began. This walks the string instead, keeps the pen state -- the SGR
+    escapes seen since the last full reset -- and re-emits it at the window's
+    first visible character, so the cut-out piece renders in the colours it had.
+
+    A double-width glyph straddling either edge becomes a space, which keeps the
+    result exactly `count` cells wide instead of overflowing by one.
+    """
+    out: list[str] = []
+    pen: list[str] = []
+    opened = False
+    col = 0
+    end = start + count
+    i = 0
+    n = len(s)
+    while i < n:
+        m = _SGR.match(s, i)
+        if m:
+            esc = m.group(0)
+            if esc[2:-1] in ("", "0"):        # a full reset clears the pen
+                pen.clear()
+            else:
+                pen.append(esc)
+            if opened:
+                out.append(esc)
+            i = m.end()
+            continue
+        ch = s[i]
+        w = _char_cells(ch)
+        if col >= start and col + w <= end:
+            if not opened:
+                out.append("".join(pen))
+                opened = True
+            out.append(ch)
+        elif w == 2 and col < end and col + w > start:
+            if not opened:
+                out.append("".join(pen))
+                opened = True
+            out.append(" ")
+        col += w
+        i += 1
+    out.append(RESET)
+    return "".join(out)
+
+
+def _scroll_offset(overflow: int, now: float) -> int:
+    """Where the viewport sits at time `now`: a triangle wave with end pauses.
+
+    The cycle is rest at home, slide out to `overflow`, rest there, slide back.
+    Deriving the position from the wall clock rather than a frame counter keeps
+    the speed identical whether Claude Code renders once a second (the idle
+    `refreshInterval`) or three times (while the model is working), and needs no
+    state carried between what are otherwise unrelated one-shot processes.
+    """
+    travel = overflow / SCROLL_SPEED if SCROLL_SPEED > 0 else 0.0
+    period = 2.0 * (travel + SCROLL_HOLD)
+    if travel <= 0 or period <= 0:
+        return 0
+    t = now % period
+    if t < SCROLL_HOLD:                                   # resting at home
+        return 0
+    t -= SCROLL_HOLD
+    if t < travel:                                        # sliding out
+        return int(round(overflow * t / travel))
+    t -= travel
+    if t < SCROLL_HOLD:                                   # resting at the far end
+        return overflow
+    t -= SCROLL_HOLD
+    return int(round(overflow * (1.0 - t / travel)))      # sliding home
+
+
+def terminal_width() -> int | None:
+    """Terminal width in cells, or None when Claude Code reported none.
+
+    Claude Code captures this script's stdout instead of attaching it to the
+    terminal, so `os.get_terminal_size()` and `tput cols` see nothing; the size
+    arrives only in the `COLUMNS` environment variable.
+    """
+    try:
+        w = int(os.environ.get("COLUMNS", ""))
+    except ValueError:
+        return None
+    return w if w > 0 else None
+
+
+def marquee(line: str, now: float | None = None) -> str:
+    """Scroll `line` back and forth while it is wider than the terminal.
+
+    A line that fits comes back untouched, and so does one whose terminal width
+    is unknown -- cutting a line to a guessed width would hide segments that
+    were rendering fine.
+    """
+    width = terminal_width()
+    if width is None:
+        return line
+    avail = width - SCROLL_MARGIN
+    if avail <= 0:
+        return line
+    overflow = visible_width(line) - avail
+    if overflow <= 0:
+        return line
+    offset = _scroll_offset(overflow, time.time() if now is None else now)
+    return _slice_cells(line, offset, avail)
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -536,7 +675,15 @@ def main():
             log = os.path.join(here, "_payload_log.jsonl")
             if not os.path.exists(log) or os.path.getsize(log) < 8_000_000:
                 with open(log, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"at": time.time(), "payload": data}) + "\n")
+                    # COLUMNS/LINES ride along because the terminal size reaches
+                    # this script only through the environment, never through the
+                    # payload -- and the scrolling in marquee() depends on it.
+                    fh.write(json.dumps({
+                        "at": time.time(),
+                        "cols": os.environ.get("COLUMNS"),
+                        "lines": os.environ.get("LINES"),
+                        "payload": data,
+                    }) + "\n")
     except Exception:
         pass
 
@@ -632,7 +779,7 @@ def main():
     segs.append(fixed_bar(ICON_DIR, get_cwd()))
 
     sep = RESET + fg(90, 100, 120) + f" {DIAMOND} " + RESET
-    sys.stdout.write(sep.join(segs) + "\n")
+    sys.stdout.write(marquee(sep.join(segs)) + "\n")
 
 
 if __name__ == "__main__":

@@ -110,8 +110,12 @@ Two complementary ways — do both when in doubt:
      next to `statusline.py`. The marker file needs no environment change and no
      restart, which is what makes the render at session start observable.
    - Each render then writes the raw payload to `_last_payload.json` and appends
-     `{"at": <unix seconds>, "payload": {…}}` to `_payload_log.jsonl` (both gitignored,
-     the log capped at 8 MB). The log is the one that survives, so the renders around a
-     session start can be read back in order. Remove the marker / flag when done.
+     `{"at": <unix seconds>, "cols": …, "lines": …, "payload": {…}}` to
+     `_payload_log.jsonl` (both gitignored, the log capped at 8 MB). The log is the one
+     that survives, so the renders around a session start can be read back in order, and
+     its timestamps are also how the render *cadence* gets measured. `cols`/`lines` are
+     the `COLUMNS`/`LINES` environment variables: the terminal size never appears in the
+     payload, so a capture is the only way to see what the script was given. Remove the
+     marker / flag when done.
    - This is the **only** way to confirm fields that depend on session state (ultracode,
      PR, worktree, vim, …) — capture once per state and diff.

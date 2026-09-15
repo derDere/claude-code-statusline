@@ -56,7 +56,7 @@ new/changed payload fields.
 
 **Data flow** (`main()`): read stdin → `json.loads` → **startup gate** → truecolor gate → pull
 fields → append segment strings to a `segs` list in fixed order → join with the diamond
-separator → write one line. Segment order: context · 5h · 7d · cost · model · effort · directory.
+separator → **marquee** → write one line. Segment order: context · 5h · 7d · cost · model · effort · directory.
 
 **Startup gate:** `is_starting(data)` is simply `not data.get("prompt_id")`. `prompt_id` is
 **absent until the first user input**, so its absence is the only field that means "the user
@@ -88,6 +88,23 @@ future colour work has something real to branch on. On a hit, `error_line()` rep
 whole status line with one red `NO TRUECOLOR (<reason>) -> <DOC_URL>` banner drawn in **legacy
 SGR** (`1;41;97`), not 24-bit escapes — it has to be readable in the very terminals it warns
 about. Keep `DOC_URL` pointing at `docs/terminal-truecolor.md` on `main`.
+
+**Marquee:** `marquee()` is the last thing that touches the line, after the segments are
+joined. A full bar is ~124 cells and overflows anything narrower, so when
+`visible_width(line)` exceeds `COLUMNS` the line scrolls: rest at home, slide out by the
+overflow, rest, slide back. `COLUMNS` is the only source of the terminal size — Claude Code
+captures stdout instead of attaching it to the terminal, so `os.get_terminal_size()` and
+`tput cols` see nothing — and when it is absent the line is emitted whole rather than cut to
+a guess. `_slice_cells()` does the cutting by *visible cell*, replaying the SGR pen state at
+the window's first character; a plain string slice would sever an escape and lose every
+colour set before the window. The offset comes from `time.time()`, not a frame counter:
+renders are unrelated one-shot processes with no shared state, and a clock-derived triangle
+wave travels at one speed whether Claude Code renders once or three times a second.
+
+> **This needs `"refreshInterval": 1` in the user's `statusLine` settings.** Event-driven
+> renders stop dead while a session is idle (measured gaps of 38 and 90 minutes), and a
+> frozen scroll can leave the context bar off-screen. The README install instructions carry
+> the key for that reason — it is not decoration.
 
 **Three segment builders**, all ending in `_wrap()` (which adds the pointy Powerline end-caps):
 - `bar(icon, text, pct, …)` — fill bar whose **hue** comes from `pct` via `RAMP` and whose

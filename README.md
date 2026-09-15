@@ -23,10 +23,16 @@ from `https://github.com/derDere/claude-code-statusline`, do exactly this:**
    {
      "statusLine": {
        "type": "command",
-       "command": "uvx --from git+https://github.com/derDere/claude-code-statusline.git claude-code-statusline"
+       "command": "uvx --from git+https://github.com/derDere/claude-code-statusline.git claude-code-statusline",
+       "refreshInterval": 1
      }
    }
    ```
+   `refreshInterval` is not optional here. Claude Code otherwise runs the status
+   line only on events, which stop while the session is idle, and the line
+   [scrolls](#scrolling-when-the-line-does-not-fit) whenever it is wider than the
+   terminal — without the timer it freezes mid-scroll until the user's next
+   prompt.
 4. **Check 24-bit colour and repair it** — do not just mention it. Without
    truecolor the status line renders nothing but a red `NO TRUECOLOR …` banner,
    so verify the terminal the user is actually sitting in:
@@ -98,7 +104,8 @@ Set the `statusLine` command in your Claude Code `settings.json`. Pick one:
 ```jsonc
 "statusLine": {
   "type": "command",
-  "command": "uvx --from git+https://github.com/derDere/claude-code-statusline.git claude-code-statusline"
+  "command": "uvx --from git+https://github.com/derDere/claude-code-statusline.git claude-code-statusline",
+  "refreshInterval": 1
 }
 ```
 
@@ -114,7 +121,8 @@ Then run the **named app** from the clone via `uv` (this installs the project
 ```jsonc
 "statusLine": {
   "type": "command",
-  "command": "uv run --project /ABSOLUTE/PATH/TO/claude-code-statusline claude-code-statusline"
+  "command": "uv run --project /ABSOLUTE/PATH/TO/claude-code-statusline claude-code-statusline",
+  "refreshInterval": 1
 }
 ```
 
@@ -125,6 +133,13 @@ Use an **absolute path** (Windows accepts forward slashes, e.g.
 > [PEP 723](https://peps.python.org/pep-0723/) script (its dependencies live in
 > the `# /// script` header), so `uv run --script /ABSOLUTE/PATH/TO/statusline.py`
 > works too — no `pyproject.toml` involved.
+
+`refreshInterval` tells Claude Code to re-run the command once a second on top of
+its event-driven renders. Keep it: the line
+[scrolls](#scrolling-when-the-line-does-not-fit) when it is wider than your
+terminal, and events stop arriving while a session is idle, so without the timer
+the line stops wherever it happened to be. `1` is the smallest value Claude Code
+accepts.
 
 ---
 
@@ -177,6 +192,10 @@ All knobs live near the top of `statusline.py`:
 - `STARTUP_SGR` / `STARTUP_TEXT` / `STARTUP_SEP` — the legacy-colour escape, wording and
   separator of the startup line (see [The startup line](#the-startup-line)). `40;37` is
   grey on black; `40;90` is dimmer, `40;97` brighter.
+- `SCROLL_SPEED` / `SCROLL_HOLD` / `SCROLL_MARGIN` — cells per second the line travels,
+  seconds it rests at each end before turning, and cells kept free on the right for
+  Claude Code's own notifications (see
+  [Scrolling when the line does not fit](#scrolling-when-the-line-does-not-fit)).
 
 ---
 
@@ -204,6 +223,33 @@ you send your first prompt.
 The window is detected from `prompt_id`, which Claude Code omits until your first
 input. The token counters cannot detect it: a resumed session restores them (they reset
 only on `/clear`), so they are already non-zero when the session starts.
+
+### Scrolling when the line does not fit
+
+A full set of segments runs to about 124 cells — more than fits in an 80-column
+terminal. When the rendered line is wider than the terminal, it scrolls: it rests at the
+left edge for a moment, slides right until its end is visible, rests there, and slides
+back. A line that fits is emitted untouched.
+
+The width comes from the `COLUMNS` environment variable, which Claude Code sets before
+running the script. Claude Code captures the script's output instead of connecting it to
+the terminal, so `tput cols` and Python's own terminal-size calls cannot see it. When
+`COLUMNS` is missing the line goes out whole rather than being cut to a guessed width.
+
+The position is derived from the wall clock rather than a frame counter. The line
+therefore travels at the same speed however often Claude Code renders it, and each render
+— a separate, short-lived process — needs no state from the one before it.
+
+That render rate is why the `statusLine` block carries `"refreshInterval": 1`. Claude
+Code runs the status line when something happens (an assistant message arrives, `/compact`
+finishes, the permission mode changes), and those triggers go silent while a session sits
+idle. The timer adds one render per second regardless, which keeps the line moving and
+brings it home again. Without it the line stops wherever the last event left it, which can
+be with the context bar scrolled off the left edge.
+
+`SCROLL_SPEED`, `SCROLL_HOLD` and `SCROLL_MARGIN` near the top of `statusline.py` set the
+travel speed, the pause at each end, and how many cells stay free on the right for the
+notifications Claude Code draws in the same row.
 
 ### Cost is only shown on API billing
 
