@@ -128,7 +128,8 @@ EFFORT_COLORS = {
     "ultracode": ("solid",   (0.35, 0.16, 308.0)),   # deep purple
     "wx":        ("solid",   (0.35, 0.16, 308.0)),   # deep purple (same look)
 }
-# Code shown in the effort bar (" <icon>  <code> "); usually one letter, "wx" two.
+# Code shown in the effort bar. Usually one letter, "wx" two -- the gap before it
+# shrinks to keep every bar EFFORT_CELLS wide (see _effort_label).
 EFFORT_LETTER = {
     "low": "l", "medium": "m", "high": "h",
     "xhigh": "x", "max": "m", "ultracode": "u", "wx": "wx",
@@ -143,6 +144,9 @@ EFFORT_SGR = {
 # Fill order: low fills 1/6 ... ultracode fills 6/6. Pseudo-levels NOT listed
 # here (e.g. "wx") are rendered fully filled by effort_bar().
 EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultracode"]
+# Cells every effort bar occupies, whatever its code is -- six of them, one per
+# level in EFFORT_ORDER, so the fill reads as a level out of six.
+EFFORT_CELLS = 6
 
 
 def _clamp(v, lo, hi): return lo if v < lo else hi if v > hi else v
@@ -408,6 +412,18 @@ def _label(icon, text):
     return f" {text} "
 
 
+def _effort_label(code: str) -> str:
+    """Build ` <icon> <code> ` held to exactly EFFORT_CELLS cells.
+
+    The gap between the icon and the code absorbs the code's length. Without
+    that, a two-character code widens the bar past every other level, which both
+    stretches the segment and slides the text left relative to the bar it sits
+    in. A code too long to fit keeps one space and grows rather than truncating.
+    """
+    gap = EFFORT_CELLS - 3 - len(code)      # leading space + icon + trailing space
+    return f" {ICON_EFFORT}{' ' * max(1, gap)}{code} "
+
+
 def _pad(label, min_width):
     """Pad a label up to min_width (spaces before trailing space)."""
     if len(label) >= min_width:
@@ -464,7 +480,7 @@ def effort_bar(level):
     if spec is None:
         return None
     kind, lch = spec
-    text = f" {ICON_EFFORT}  {EFFORT_LETTER.get(level, '?')} "   # 6 cells
+    text = _effort_label(EFFORT_LETTER.get(level, "?"))
     width = len(text)
     fill = EFFORT_ORDER.index(level) + 1 if level in EFFORT_ORDER else width
 
@@ -521,6 +537,8 @@ def workflows_enabled(data):
     env var. Default: enabled. Caveat: we cannot see plan-level availability
     (Pro defaults workflows off until enabled in /config), so this can be wrong
     on Pro."""
+    if OPTIONS.workflows is not None:
+        return OPTIONS.workflows
     disabled = False
     env = os.environ.get("CLAUDE_CODE_DISABLE_WORKFLOWS")
     if env is not None:
@@ -686,21 +704,52 @@ def detect_background(data) -> str:
     return "light" if theme.strip().lower().startswith("light") else "dark"
 
 
-#: Depth names accepted by --colors.
+#: Depth names accepted by --colors, and as bare flags of the same name.
 COLOR_ARGS = {
     "mono": ColorSupport.MONO, "bw": ColorSupport.MONO,
-    "ansi16": ColorSupport.ANSI16, "16": ColorSupport.ANSI16,
+    "ansi": ColorSupport.ANSI16, "ansi16": ColorSupport.ANSI16,
+    "16": ColorSupport.ANSI16,
     "ansi256": ColorSupport.ANSI256, "256": ColorSupport.ANSI256,
     "truecolor": ColorSupport.TRUECOLOR, "24bit": ColorSupport.TRUECOLOR,
 }
 
+USAGE = """\
+claude-code-statusline — reads one Claude Code payload on stdin, writes one line.
+
+Everything below overrides a value the script would otherwise detect itself.
+
+  --light, --dark            terminal background (default: Claude Code's theme)
+  --colors DEPTH             colour depth, one of:
+                               truecolor, 24bit
+                               ansi256, 256
+                               ansi, ansi16, 16
+                               mono, bw
+  --truecolor, --256, ...    the same depths as bare flags
+  --width N                  terminal width in cells (default: $COLUMNS)
+  --no-scroll                never scroll, even when the line does not fit
+  --workflows                treat dynamic workflows as enabled  (the "wx" bar)
+  --no-workflows             treat them as disabled
+  -h, --help                 show this text
+
+Unrecognised arguments are ignored: this runs from a command string in
+settings.json, and refusing to draw over its own arguments would be worse.
+"""
+
 
 @dataclass(frozen=True)
 class Overrides:
-    """What the command line forces, in place of what would be detected."""
+    """What the command line forces, in place of what would be detected.
+
+    Every value this script works out on its own has an entry here, so a
+    terminal that is measured wrongly can always be told the truth by hand.
+    """
 
     background: str | None = None      #: "light", "dark", or None to detect
     level: ColorSupport | None = None  #: forced colour depth, or None to detect
+    width: int | None = None           #: forced terminal width in cells
+    scroll: bool = True                #: whether an overlong line may scroll
+    workflows: bool | None = None      #: forced answer for the "wx" proxy
+    help: bool = False                 #: print the usage text and stop
 
     def level_caps(self) -> "ColorCaps | None":
         """The forced depth as a ColorCaps, or None when nothing was forced."""
@@ -711,23 +760,45 @@ class Overrides:
 
 
 def parse_args(argv) -> Overrides:
-    """Read `--light`, `--dark` and `--colors LEVEL` (or `--colors=LEVEL`).
+    """Turn the command line into an `Overrides` record.
 
     Unrecognised arguments are ignored on purpose: this script is invoked from a
     command string in settings.json, and a status line that aborts over its own
-    arguments is worse than one that renders with detected values.
+    arguments is worse than one that renders with detected values. For the same
+    reason a malformed `--width` is dropped rather than raised.
     """
-    background = level = None
+    background = level = width = workflows = None
+    scroll, help_ = True, False
     rest = iter(argv)
     for arg in rest:
-        if arg == "--light":
-            background = "light"
-        elif arg == "--dark":
-            background = "dark"
-        elif arg.startswith("--colors"):
-            value = arg.split("=", 1)[1] if "=" in arg else next(rest, "")
-            level = COLOR_ARGS.get(value.strip().lower(), level)
-    return Overrides(background, level)
+        name = arg.split("=", 1)[0]
+        value = arg.split("=", 1)[1] if "=" in arg else None
+
+        if arg in ("--light", "--dark"):
+            background = arg[2:]
+        elif name == "--colors":
+            level = COLOR_ARGS.get((value if value is not None
+                                    else next(rest, "")).strip().lower(), level)
+        elif arg[2:].lower() in COLOR_ARGS and arg.startswith("--"):
+            level = COLOR_ARGS[arg[2:].lower()]
+        elif name == "--width":
+            try:
+                width = int(value if value is not None else next(rest, ""))
+            except ValueError:
+                pass
+        elif arg == "--no-scroll":
+            scroll = False
+        elif arg == "--workflows":
+            workflows = True
+        elif arg == "--no-workflows":
+            workflows = False
+        elif arg in ("-h", "--help"):
+            help_ = True
+    return Overrides(background, level, width, scroll, workflows, help_)
+
+
+#: Command-line overrides; `main()` replaces it once the arguments are parsed.
+OPTIONS = Overrides()
 
 
 # ── Startup line ──────────────────────────────────────────────────────────────
@@ -827,7 +898,7 @@ def _slice_cells(s: str, start: int, count: int) -> str:
     """Cut `count` visible cells out of `s`, starting at cell `start`.
 
     A plain string slice cannot do this: the rendered line is mostly colour
-    escapes (roughly 3900 bytes carry 124 visible cells), so slicing by index
+    escapes (roughly 3900 bytes carry 123 visible cells), so slicing by index
     would cut an escape in half and would also drop every colour set before the
     window began. This walks the string instead, keeps the pen state -- the SGR
     escapes seen since the last full reset -- and re-emits it at the window's
@@ -906,6 +977,8 @@ def terminal_width() -> int | None:
     terminal, so `os.get_terminal_size()` and `tput cols` see nothing; the size
     arrives only in the `COLUMNS` environment variable.
     """
+    if OPTIONS.width is not None:
+        return OPTIONS.width if OPTIONS.width > 0 else None
     try:
         w = int(os.environ.get("COLUMNS", ""))
     except ValueError:
@@ -920,6 +993,8 @@ def marquee(line: str, now: float | None = None) -> str:
     is unknown -- cutting a line to a guessed width would hide segments that
     were rendering fine.
     """
+    if not OPTIONS.scroll:
+        return line
     width = terminal_width()
     if width is None:
         return line
@@ -934,6 +1009,12 @@ def marquee(line: str, now: float | None = None) -> str:
 
 
 def main():
+    global COLOR, INK, PALETTE, OPTIONS
+    OPTIONS = parse_args(sys.argv[1:])
+    if OPTIONS.help:
+        sys.stdout.write(USAGE)
+        return
+
     try:
         raw = sys.stdin.read()
         data = json.loads(raw)
@@ -973,10 +1054,8 @@ def main():
     # The background decides every lightness in the line, the startup line's
     # included, so it is settled before anything is drawn. It needs no terminal
     # probing -- it comes from Claude Code's own theme setting.
-    global COLOR, INK, PALETTE
-    opts = parse_args(sys.argv[1:])
     PALETTE = (LIGHT_PALETTE
-               if (opts.background or detect_background(data)) == "light"
+               if (OPTIONS.background or detect_background(data)) == "light"
                else DARK_PALETTE)
 
     # Before the first API response the payload is still filling in. Announce
@@ -987,7 +1066,7 @@ def main():
 
     # Pick the renderer for whatever colour depth this terminal has. Every
     # depth draws a real status line, so nothing is refused here.
-    COLOR = opts.level_caps() or detect_color_caps()
+    COLOR = OPTIONS.level_caps() or detect_color_caps()
     INK = INKS[COLOR.level]()
 
     mid   = data.get("model", {}).get("id", "")

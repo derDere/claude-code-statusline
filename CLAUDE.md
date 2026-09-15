@@ -42,7 +42,18 @@ uv run --script statusline.py < payload.json  # PEP 723 mode — no pyproject in
 ```
 
 There is **no test suite and no linter configured**. "Testing" means piping a representative
-JSON payload through the script and eyeballing the rendered line. A minimal smoke payload:
+JSON payload through the script and eyeballing the rendered line. `preview.py` does that for
+every state at once — session states, the fill ramp, all effort levels, the segment builders
+and the colour depth × background grid — and forwards every `statusline.py` flag:
+
+```sh
+uv run --script preview.py            # the whole gallery
+uv run --script preview.py --ansi --light
+uv run --script preview.py --matrix   # only the depth x background grid
+```
+
+It renders with `--no-scroll`, so it shows everything except the marquee. A minimal smoke
+payload:
 
 ```sh
 echo '{"model":{"id":"claude-opus-4-8","display_name":"Opus 4.8"},"context_window":{"context_window_size":1000000,"used_percentage":20},"rate_limits":{"five_hour":{"used_percentage":10}}}' | uv run claude-code-statusline
@@ -112,17 +123,21 @@ reads as a heavy block stamped onto the page.
 > answer; every theme name starts with `light` or `dark` (`-ansi` and `-daltonized` included).
 > It is read through the same user → project → project-local cascade as `workflows_enabled()`.
 
-**Overrides.** `parse_args()` reads `--light`/`--dark` and `--colors <depth>`, which is also
-the only way to compare renderers without changing terminals. Unknown arguments are ignored on
-purpose: this runs from a command string in `settings.json`, and refusing to draw over one's
-own arguments is worse than drawing with detected values.
+**Overrides.** `parse_args()` fills the module-level `OPTIONS`, and **every value the script
+detects has a flag**: `--light`/`--dark` (background), `--colors <depth>` plus the bare
+`--truecolor`/`--256`/`--ansi`/`--mono` forms (depth), `--width N` (`terminal_width()`),
+`--no-scroll` (`marquee()`), `--workflows`/`--no-workflows` (`workflows_enabled()`), and
+`--help`. Keep that property when adding a detector. Arguments are parsed **before stdin is
+read**, so `--help` does not block waiting for a payload. Unknown arguments and a malformed
+`--width` are ignored on purpose: this runs from a command string in `settings.json`, and
+refusing to draw over one's own arguments is worse than drawing with detected values.
 
 > **There is no NO TRUECOLOR banner.** It existed because every bar was a 24-bit escape that a
 > lesser terminal would silently round into nonsense. Each depth now has a renderer built for
 > it, so a banner would replace a working ANSI16 bar with a red error. Do not reintroduce one.
 
 **Marquee:** `marquee()` is the last thing that touches the line, after the segments are
-joined. A full bar is ~124 cells and overflows anything narrower, so when
+joined. A full bar is ~123 cells and overflows anything narrower, so when
 `visible_width(line)` exceeds `COLUMNS` the line scrolls: rest at home, slide out by the
 overflow, rest, slide back. `COLUMNS` is the only source of the terminal size — Claude Code
 captures stdout instead of attaching it to the terminal, so `os.get_terminal_size()` and
@@ -144,8 +159,12 @@ wave travels at one speed whether Claude Code renders once or three times a seco
   fill **level** is also `pct`. `alwaysfill=True` lights the whole width but still hues by `pct`
   (used by the cost bar).
 - `fixed_bar(icon, text)` — solid brand color `FIXED_HEX` (model / directory).
-- `effort_bar(level)` — 6-cell bar, fills 1/6…6/6 per `EFFORT_ORDER`, colored by `EFFORT_COLORS`
-  (each level has its own color or a `rainbow` sweep — **not** the green→red ramp).
+- `effort_bar(level)` — bar of `EFFORT_CELLS` (6) cells, filling 1/6…6/6 per `EFFORT_ORDER`,
+  colored by `EFFORT_COLORS` (each level has its own color or a `rainbow` sweep — **not** the
+  green→red ramp). `_effort_label()` holds the width: the gap between icon and code absorbs the
+  code's length, so the two-character `wx` does not widen the segment and shift its text left
+  against every other level. Never build that label by interpolating the code into a fixed
+  template — the width has to be the constant, not the gap.
 
 **Color core:** `RAMP` is four OKLCH stops (green→yellow→orange→red); `_ramp_at(frac)` linearly
 interpolates them. `oklch_rgb(L,C,H)` converts to sRGB and is `@lru_cache`d — keep its inputs

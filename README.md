@@ -239,7 +239,7 @@ only on `/clear`), so they are already non-zero when the session starts.
 
 ### Scrolling when the line does not fit
 
-A full set of segments runs to about 124 cells — more than fits in an 80-column
+A full set of segments runs to about 123 cells — more than fits in an 80-column
 terminal. When the rendered line is wider than the terminal, it scrolls: it rests at the
 left edge for a moment, slides right until its end is visible, rests there, and slides
 back. A line that fits is emitted untouched.
@@ -347,20 +347,50 @@ matching Claude Code's own default.
 
 ### Overriding what is detected
 
-Both decisions can be forced from the command in `settings.json`, which is also
-how the renderers are compared without changing terminals:
+The script works five things out on its own, and every one of them has a flag, so
+a terminal that is measured wrongly can be told the truth by hand. Append them to
+the `command` in `settings.json`, or use them to compare renderings without
+changing terminals.
+
+| Flag | Overrides | Default |
+|---|---|---|
+| `--light`, `--dark` | terminal background | Claude Code's `theme` setting |
+| `--colors DEPTH` | colour depth | measured from tmux / `COLORTERM` / `TERM` |
+| `--truecolor`, `--256`, `--ansi`, `--mono`, … | the same depths, as bare flags | — |
+| `--width N` | terminal width in cells | `$COLUMNS` |
+| `--no-scroll` | never scroll an overlong line | scrolling on |
+| `--workflows`, `--no-workflows` | the workflow state behind the `wx` bar | read from settings and env |
+| `-h`, `--help` | prints the list and exits | — |
+
+`--colors` accepts `truecolor`/`24bit`, `256`/`ansi256`, `16`/`ansi16`/`ansi` and
+`mono`/`bw`; each of those names also works as a bare `--name` flag.
 
 ```sh
-uv run --project . claude-code-statusline --light
-uv run --project . claude-code-statusline --colors 16
-uv run --project . claude-code-statusline --colors mono --light
+uv run --project . claude-code-statusline --light --ansi
+uv run --project . claude-code-statusline --mono --width 60
+uv run --project . claude-code-statusline --help
 ```
 
-`--light` / `--dark` set the background. `--colors` takes `truecolor` (or
-`24bit`), `256` (`ansi256`), `16` (`ansi16`) or `mono` (`bw`). Unrecognised
-arguments are ignored rather than treated as errors — a status line that refuses
-to draw because of its own command string is worse than one that draws with
-detected values.
+Unrecognised arguments are ignored rather than treated as errors, and so is a
+malformed `--width` — a status line that refuses to draw because of its own
+command string is worse than one that draws with detected values.
+
+### Seeing all of it at once
+
+`preview.py` renders every state the line can show — each session state, the fill
+ramp, all effort levels, the segment builders on their own, and the colour depth ×
+background grid:
+
+```sh
+uv run --script preview.py            # the whole gallery
+uv run --script preview.py --ansi     # the same gallery in 16 colours
+uv run --script preview.py --light    # as it looks on a light terminal
+uv run --script preview.py --matrix   # only the depth x background grid
+```
+
+Every flag from the table above is passed straight through. Scrolling is the one
+thing it leaves out: that needs a terminal narrower than the line plus a clock to
+advance it, so each row is drawn at full width.
 
 ---
 
