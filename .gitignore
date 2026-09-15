@@ -7,5 +7,7 @@ uv.lock
 # Temp folder
 .temp/
 
-# Statusline debug dump (STATUSLINE_DEBUG=1)
+# Statusline debug capture (STATUSLINE_DEBUG=1, or the _capture marker file)
 _last_payload.json
+_payload_log.jsonl
+_capture

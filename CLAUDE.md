@@ -58,16 +58,20 @@ new/changed payload fields.
 fields → append segment strings to a `segs` list in fixed order → join with the diamond
 separator → write one line. Segment order: context · 5h · 7d · cost · model · effort · directory.
 
-**Startup gate:** `is_starting(data)` is true while the session has produced no API response
-yet — `context_window.current_usage` is `null` **and** `used_percentage` and
-`total_input_tokens` are both empty (`/compact` also nulls `current_usage` but leaves the
-counters non-zero, so it does not re-enter the window). In that window `startup_line(data)`
-replaces the whole line with `starting... | <model> | <cwd>`, drawn in **legacy SGR**
-(`STARTUP_SGR`) with plain ASCII — no 24-bit escapes, no Nerd Font glyphs, no `_wrap()` caps —
-because nothing is yet known about what the terminal can render. It shows only the model and
-the directory, the two fields that are already correct that early. This gate is what keeps a
-half-filled payload from being rendered as bars; it runs **before** the truecolor gate so a
-tmux client that is still attaching cannot produce a banner.
+**Startup gate:** `is_starting(data)` is simply `not data.get("prompt_id")`. `prompt_id` is
+**absent until the first user input**, so its absence is the only field that means "the user
+has not typed anything yet". Claude Code renders the status line once when a session starts,
+**including when it is resumed**, and that is the render this guards. In that window
+`startup_line(data)` replaces the whole line with `starting... | <model> | <cwd>`, drawn in
+**legacy SGR** (`STARTUP_SGR`) with plain ASCII — no 24-bit escapes, no Nerd Font glyphs, no
+`_wrap()` caps — because nothing is yet known about what the terminal can render. It shows
+only the model and the directory, the two fields that are already correct that early. It runs
+**before** the truecolor gate, so a tmux client that is still attaching cannot produce a banner.
+
+> **Do not rebuild this gate out of the measured fields.** A resumed session restores its
+> context, cost and duration — those reset only on `/clear` — so `used_percentage` and
+> `total_input_tokens` are already non-zero at the startup render, and `current_usage` is
+> `null` again after every `/compact`. `prompt_id` is the signal; the counters are not.
 
 **Truecolor gate:** `detect_color_caps()` runs before any segment is built and its result lands
 in the module-level `COLOR` variable (a frozen `ColorCaps`: a `ColorSupport` level —
@@ -98,17 +102,26 @@ interpolates them. `oklch_rgb(L,C,H)` converts to sRGB and is `@lru_cache`d — 
 hashable. Every bar carries a subtle left→right lightness gradient via `_slope()`.
 
 ### Two billing modes drive what's shown
-`is_api = not rate` (no `rate_limits` in the payload ⇒ API billing). On **subscription**, the
-5h/7d bars render and the cost bar is **hidden** (Claude Code reports only an *estimate* there).
-On **API billing**, there are no rate-limit bars and the cost bar shows real
-`cost.total_cost_usd` (only when `> 0`).
+On **subscription**, the 5h/7d bars render and the cost bar is **hidden** (Claude Code reports
+only an *estimate* there). On **API billing**, there are no rate-limit bars and the cost bar
+shows real `cost.total_cost_usd` (only when `> 0`).
 
-`is_api` is only meaningful past the startup gate: an early payload has no `rate_limits` yet
-and would read as API billing, showing a subscription's *estimated* cost as if it had been
-spent. The gate's early return is what prevents that — the cost condition itself needs no extra
-clause. One race survives: a first API response arriving before the rate limits do can still
-show an estimated cost for a single render, and the payload carries no positive "this is API
-billing" field with which to close it.
+There is **no** positive billing field (`billing`/`plan`/`account_type` do not exist), and
+`rate_limits` appears only for Pro/Max (or a Claude apps gateway) **and only after the first
+API response in the session**. So its absence only means API billing once a response has
+actually come back, which `current_usage` records: `is_api = not rate and answered`, where
+`answered = cw.get("current_usage") is not None`.
+
+Both halves are load-bearing. `cost.total_cost_usd` is cumulative and survives
+`--continue`/`--resume` (it resets only on `/clear`; Claude Code persists it as a `cost-state`
+entry in the transcript). Drop the `answered` half and a resumed subscription session renders
+that restored figure as a real API-billing cost the moment it starts — money the user never
+spent in this run. The startup gate hides the first render, but renders between submitting a
+prompt and the response arriving would still show it.
+
+Cost therefore also hides after `/compact` on genuine API billing until the next response,
+since `current_usage` is `null` again. Claiming a billing mode the payload cannot evidence is
+the worse trade.
 
 ### Ultracode detection — impossible to detect; "wx" proxy instead
 Official docs (verified 2026-06-17): *"Ultracode is not a distinct level and reports as

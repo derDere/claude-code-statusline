@@ -29,6 +29,7 @@ import io
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import lru_cache
@@ -457,25 +458,21 @@ STARTUP_SEP = " | "
 
 
 def is_starting(data) -> bool:
-    """Whether the session has not produced a single API response yet.
+    """Whether no prompt has been submitted in this run of the session yet.
 
-    Until it has, the payload is still filling in, and bars built on it would
-    lie: `rate_limits` may not have arrived on a subscription (which reads as
-    API billing and shows an estimated cost that was never spent), and tmux may
-    not have finished negotiating colours.
+    `prompt_id` is the id of the prompt being handled and is **absent until the
+    first user input**, which makes its absence the one signal that means "the
+    user has not typed anything yet". Claude Code renders the status line once
+    when a session starts -- including when it is resumed -- and that render is
+    the one this guards.
 
-    `context_window.current_usage` is null before the first API call *and* after
-    /compact, so the token counters are checked too: after a compaction they are
-    non-zero and the session is not starting.
+    The measured fields cannot stand in for it. A resumed session restores its
+    context, cost and duration (they reset only on `/clear`), so token counters
+    and `used_percentage` are already non-zero at startup. `current_usage` is
+    null both before the first API call *and* after `/compact`, so on its own it
+    would drag the startup line back after every compaction.
     """
-    cw = data.get("context_window") or {}
-    if cw.get("current_usage") is not None:
-        return False
-    if cw.get("used_percentage"):
-        return False
-    if cw.get("total_input_tokens"):
-        return False
-    return True
+    return not data.get("prompt_id")
 
 
 def startup_line(data) -> str:
@@ -521,12 +518,24 @@ def main():
         sys.stdout.write("claude\n")
         return
 
-    # TEMP DEBUG: dump the real payload so we can see effort/ultracode fields.
+    # DEBUG capture: see docs/payload-schema.md ("How to refresh"). Enabled by
+    # STATUSLINE_DEBUG=1 or by creating the marker file `_capture` next to this
+    # script -- the marker needs no restart, which is what makes the renders
+    # around session start observable at all.
     try:
-        if os.environ.get("STATUSLINE_DEBUG", "0") == "1":
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "_last_payload.json"), "w", encoding="utf-8") as fh:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if (os.environ.get("STATUSLINE_DEBUG", "0") == "1"
+                or os.path.exists(os.path.join(here, "_capture"))):
+            with open(os.path.join(here, "_last_payload.json"), "w",
+                      encoding="utf-8") as fh:
                 fh.write(raw)
+            # Append every render, so the sequence around session start survives
+            # instead of only the most recent line. Capped so a marker file left
+            # behind by accident cannot grow without bound.
+            log = os.path.join(here, "_payload_log.jsonl")
+            if not os.path.exists(log) or os.path.getsize(log) < 8_000_000:
+                with open(log, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"at": time.time(), "payload": data}) + "\n")
     except Exception:
         pass
 
@@ -548,8 +557,14 @@ def main():
     mname = data.get("model", {}).get("display_name", mid)
     cw    = data.get("context_window", {}) or {}
     rate  = data.get("rate_limits", {}) or {}
-    # No subscription rate-limits in the payload => running on API billing.
-    is_api = not rate
+    # Billing mode is inferred, never given: `rate_limits` appears only for
+    # subscriptions, and only *after the first API response in the session*. Its
+    # absence therefore means "API billing" only once a response has actually
+    # happened -- which `current_usage` records (null before the first API call).
+    # Without that second half, a session that has not called the API yet reads
+    # as API billing and bills the user for a cost it merely restored from disk.
+    answered = cw.get("current_usage") is not None
+    is_api = not rate and answered
     eff = data.get("effort") or {}
     effort = eff.get("level")
     # Real ultracode CANNOT be detected from a status line (verified 2026-06-17):

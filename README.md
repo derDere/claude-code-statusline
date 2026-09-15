@@ -183,10 +183,11 @@ All knobs live near the top of `statusline.py`:
 
 ### The startup line
 
-Until the session has produced its first API response, the payload is still filling
-in — the context counters are empty, and on a subscription `rate_limits` has not
-arrived yet. Bars drawn on those fields would state things that are not true, so for
-that window the script prints a plain startup line instead:
+Until you submit your first prompt, the payload cannot be trusted: on a subscription
+`rate_limits` has not arrived yet (it appears only after the first API response), and a
+resumed session restores its context, cost and duration from disk. Bars drawn on that
+would state things that are not true — most visibly a dollar figure restored from
+earlier runs — so for that window the script prints a plain startup line instead:
 
 ```
  starting...  |  Opus 5  |  ~/sources/claude-code-statusline
@@ -199,18 +200,24 @@ readable even on a monochrome terminal, before anything is known about what the
 terminal can render. The full bar takes over on the first render after an API
 response.
 
-The window is detected from `context_window`: no `current_usage`, no
-`used_percentage` and no `total_input_tokens`. `/compact` also clears
-`current_usage`, but leaves the token counters non-zero, so a compaction does not
-bring the startup line back.
+The window is detected from `prompt_id`, which Claude Code omits until your first
+input. The token counters cannot detect it: a resumed session restores them (they reset
+only on `/clear`), so they are already non-zero when the session starts.
 
 ### Cost is only shown on API billing
 
 The cost segment appears **only when no subscription rate-limits are present** in
-the payload (i.e. you are billed per-API-call) and the reported cost is `> 0`. On
-a subscription, Claude Code still reports an *estimated* `cost.total_cost_usd`,
-which is intentionally hidden — the bar reflects money actually spent, not an
-estimate of the session's worth.
+the payload (i.e. you are billed per-API-call), an API response has already come back,
+and the reported cost is `> 0`. On a subscription, Claude Code still reports an
+*estimated* `cost.total_cost_usd`, which is intentionally hidden — the bar reflects money
+actually spent, not an estimate of the session's worth.
+
+The "API response has already come back" condition matters because `rate_limits` shows up
+only *after* the first API response. Until then its absence proves nothing, and
+`cost.total_cost_usd` is cumulative across `--continue`/`--resume` (it resets only on
+`/clear`) — so without that check a resumed subscription session would greet you with a
+restored dollar figure as though you had just spent it. The trade-off: on genuine API
+billing the cost bar also hides right after `/compact`, until the next response.
 
 ### Ultracode detection
 
