@@ -26,8 +26,8 @@ feeds it**, and that payload gains fields over time. Don't trust memory — chec
   `STATUSLINE_DEBUG=1` capture trick).
 - [`docs/ultracode-detection.md`](docs/ultracode-detection.md) — the ultracode/xhigh
   distinction, the current (unverified) detection, and how to verify it.
-- [`docs/terminal-truecolor.md`](docs/terminal-truecolor.md) — why the line needs
-  24-bit colour, how the check decides, and the tmux/SSH fixes the red banner points at.
+- [`docs/terminal-truecolor.md`](docs/terminal-truecolor.md) — what each colour depth
+  renders, how the depth is decided, and the tmux/SSH fixes for reaching 24-bit.
 
 To get authoritative, up-to-date Claude Code facts, dispatch the **`claude-code-guide`**
 subagent (it can `WebFetch`/`WebSearch` the official docs) or read
@@ -54,8 +54,8 @@ new/changed payload fields.
 
 ## Architecture
 
-**Data flow** (`main()`): read stdin → `json.loads` → **startup gate** → truecolor gate → pull
-fields → append segment strings to a `segs` list in fixed order → join with the diamond
+**Data flow** (`main()`): read stdin → `json.loads` → **palette** → **startup gate** → **ink**
+→ pull fields → append segment strings to a `segs` list in fixed order → join with the
 separator → **marquee** → write one line. Segment order: context · 5h · 7d · cost · model · effort · directory.
 
 **Startup gate:** `is_starting(data)` is simply `not data.get("prompt_id")`. `prompt_id` is
@@ -63,31 +63,63 @@ separator → **marquee** → write one line. Segment order: context · 5h · 7d
 has not typed anything yet". Claude Code renders the status line once when a session starts,
 **including when it is resumed**, and that is the render this guards. In that window
 `startup_line(data)` replaces the whole line with `starting... | <model> | <cwd>`, drawn in
-**legacy SGR** (`STARTUP_SGR`) with plain ASCII — no 24-bit escapes, no Nerd Font glyphs, no
-`_wrap()` caps — because nothing is yet known about what the terminal can render. It shows
-only the model and the directory, the two fields that are already correct that early. It runs
-**before** the truecolor gate, so a tmux client that is still attaching cannot produce a banner.
+**legacy SGR** (`STARTUP_SGR`, or `STARTUP_SGR_LIGHT`) with plain ASCII — no 24-bit escapes,
+no Nerd Font glyphs, no end-caps — because nothing is yet known about what the terminal can
+render. It shows only the model and the directory, the two fields that are already correct
+that early. The palette is chosen before it, so it follows a light terminal; the depth is not,
+because it does not need one.
 
 > **Do not rebuild this gate out of the measured fields.** A resumed session restores its
 > context, cost and duration — those reset only on `/clear` — so `used_percentage` and
 > `total_input_tokens` are already non-zero at the startup render, and `current_usage` is
 > `null` again after every `/compact`. `prompt_id` is the signal; the counters are not.
 
-**Truecolor gate:** `detect_color_caps()` runs before any segment is built and its result lands
-in the module-level `COLOR` variable (a frozen `ColorCaps`: a `ColorSupport` level —
-`MONO`/`ANSI16`/`ANSI256`/`TRUECOLOR` — plus `certain` and `reason`). `COLOR` defaults to
-assumed-truecolor at import, so importing the module never shells out. Inside tmux it asks
-`tmux display-message -p '#{client_termfeatures}'` for `RGB` (authoritative — `tmux info` is
-**not**, it reports the outer terminfo entry and misses RGB granted via `terminal-features`);
-outside tmux it accepts `COLORTERM=truecolor|24bit` or a `*-direct` `TERM`, and otherwise reads
-the depth left over from `TERM`. Anything undecidable — **including an empty tmux feature list,
-which just means the client is still attaching** — is recorded as truecolor with
-`certain=False`. The banner needs `COLOR.banner_worthy`, i.e. a *measured* shortfall, so it
-never fires without evidence. Nothing renders differently per level yet; the levels exist so
-future colour work has something real to branch on. On a hit, `error_line()` replaces the
-whole status line with one red `NO TRUECOLOR (<reason>) -> <DOC_URL>` banner drawn in **legacy
-SGR** (`1;41;97`), not 24-bit escapes — it has to be readable in the very terminals it warns
-about. Keep `DOC_URL` pointing at `docs/terminal-truecolor.md` on `main`.
+**Colour model — two independent axes.** *Depth* is what the terminal can encode; *background*
+is whether it is light or dark. They are detected separately and neither refuses to render.
+
+**Depth → Ink.** `detect_color_caps()` yields a frozen `ColorCaps` (a `ColorSupport` level —
+`MONO`/`ANSI16`/`ANSI256`/`TRUECOLOR` — plus `certain` and `reason`) into the module-level
+`COLOR`, and `INKS[COLOR.level]()` lands in `INK`. An `Ink` answers three questions per cell —
+`ramp()`, `fixed()`, `effort()` — plus `separator()`, each returning *(cell escape, cap tint)*;
+a cap is a foreground glyph, so it needs its neighbour's background as a foreground escape.
+`RgbInk` holds every colour decision once so `TrueColorInk` and `Ansi256Ink` cannot drift;
+they differ only in the encoder and in `gradient`. `Ansi16Ink` and `MonoInk` bypass RGB
+entirely.
+
+> **Two rules here are load-bearing, not stylistic.** `Ansi256Ink` sets `gradient = False`
+> because the 6×6×6 cube cannot hold a subtle ramp — adjacent cells either round to the same
+> index or jump a whole step, which reads as a seam. And `Ansi16Ink` maps the ramp through
+> `RAMP16` **semantically**: matched by nearest RGB, any mid-lightness green lands on grey,
+> turning a healthy context bar into a dead one. Never "simplify" either into a colour lookup.
+
+Inside tmux truecolor is read from `tmux display-message -p '#{client_termfeatures}'` (`RGB`;
+authoritative — `tmux info` is **not**, it reports the outer terminfo entry and misses RGB
+granted via `terminal-features`); outside tmux from `COLORTERM=truecolor|24bit` or a
+`*-direct` `TERM`; otherwise from what is left in `TERM`. Anything undecidable — **including
+an empty tmux feature list, which just means the client is still attaching** — is recorded as
+truecolor with `certain=False`. `COLOR` defaults to assumed-truecolor at import, so importing
+the module never shells out.
+
+**Background → Palette.** `detect_background(data)` returns `"light"` or `"dark"` and selects
+`LIGHT_PALETTE` or `DARK_PALETTE` into `PALETTE`. Every lightness in the line comes from there,
+so it is settled **before the startup gate** — the startup line has a light variant too. On
+dark the fill is lighter than its empty track; on light that relationship inverts, or each bar
+reads as a heavy block stamped onto the page.
+
+> **The background cannot be measured from in here.** The payload carries no theme field, and
+> the OSC 11 query that would ask the terminal needs its reply on stdin — which Claude Code
+> has already filled with the payload. Claude Code's own `theme` setting is the only readable
+> answer; every theme name starts with `light` or `dark` (`-ansi` and `-daltonized` included).
+> It is read through the same user → project → project-local cascade as `workflows_enabled()`.
+
+**Overrides.** `parse_args()` reads `--light`/`--dark` and `--colors <depth>`, which is also
+the only way to compare renderers without changing terminals. Unknown arguments are ignored on
+purpose: this runs from a command string in `settings.json`, and refusing to draw over one's
+own arguments is worse than drawing with detected values.
+
+> **There is no NO TRUECOLOR banner.** It existed because every bar was a 24-bit escape that a
+> lesser terminal would silently round into nonsense. Each depth now has a renderer built for
+> it, so a banner would replace a working ANSI16 bar with a red error. Do not reintroduce one.
 
 **Marquee:** `marquee()` is the last thing that touches the line, after the segments are
 joined. A full bar is ~124 cells and overflows anything narrower, so when
@@ -106,7 +138,8 @@ wave travels at one speed whether Claude Code renders once or three times a seco
 > frozen scroll can leave the context bar off-screen. The README install instructions carry
 > the key for that reason — it is not decoration.
 
-**Three segment builders**, all ending in `_wrap()` (which adds the pointy Powerline end-caps):
+**Three segment builders**, all ending in `_compose()` (which styles each cell from the active
+`INK` and adds the pointy Powerline end-caps unless the Ink declares `caps = False`):
 - `bar(icon, text, pct, …)` — fill bar whose **hue** comes from `pct` via `RAMP` and whose
   fill **level** is also `pct`. `alwaysfill=True` lights the whole width but still hues by `pct`
   (used by the cost bar).
@@ -116,7 +149,9 @@ wave travels at one speed whether Claude Code renders once or three times a seco
 
 **Color core:** `RAMP` is four OKLCH stops (green→yellow→orange→red); `_ramp_at(frac)` linearly
 interpolates them. `oklch_rgb(L,C,H)` converts to sRGB and is `@lru_cache`d — keep its inputs
-hashable. Every bar carries a subtle left→right lightness gradient via `_slope()`.
+hashable. `_slope()` supplies the left→right lightness gradient, which only `TrueColorInk`
+draws. Bar colours are never chosen in a builder: builders decide *which* cells are filled,
+the Ink decides what that looks like.
 
 ### Two billing modes drive what's shown
 On **subscription**, the 5h/7d bars render and the cost bar is **hidden** (Claude Code reports

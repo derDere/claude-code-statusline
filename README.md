@@ -33,9 +33,10 @@ from `https://github.com/derDere/claude-code-statusline`, do exactly this:**
    [scrolls](#scrolling-when-the-line-does-not-fit) whenever it is wider than the
    terminal — without the timer it freezes mid-scroll until the user's next
    prompt.
-4. **Check 24-bit colour and repair it** — do not just mention it. Without
-   truecolor the status line renders nothing but a red `NO TRUECOLOR …` banner,
-   so verify the terminal the user is actually sitting in:
+4. **Check 24-bit colour and offer to repair it.** The status line renders in
+   whatever colour depth it finds — 24-bit, 256, 16 or none — but only 24-bit
+   carries the smooth green→red ramp and the left→right gradient, so it is worth
+   checking the terminal the user is actually sitting in:
    - **Inside tmux** (`$TMUX` is set): `tmux display-message -p '#{client_termfeatures}'`
      must list `RGB`. If it does not, add the block below to the user's
      **`~/.tmux.conf`** (tmux reads only `~/.tmux.conf` or
@@ -60,6 +61,8 @@ from `https://github.com/derDere/claude-code-statusline`, do exactly this:**
      fixes it at the source.
 
    Full write-up: [`docs/terminal-truecolor.md`](docs/terminal-truecolor.md).
+   Leave it alone if the user prefers their terminal as it is — the lower depths
+   are supported, not tolerated.
 5. **Tell the user** they need a **[Nerd Font](https://www.nerdfonts.com/)** in
    their terminal, otherwise the glyphs won't render.
 6. *(Optional)* verify it runs:
@@ -186,12 +189,21 @@ All knobs live near the top of `statusline.py`:
 - `EFFORT_COLORS` — per-level colour (or `rainbow`) for the effort bar.
 - `EFFORT_LETTER` — the short code shown per effort level (usually one letter; `wx` is two).
 - `DL_FILL` / `DL_FIXED` — strength of the left→right lightness gradient.
-- `L_EMPTY` / `C_EMPTY` — lightness/chroma of the empty bar track.
+- `L_EMPTY` / `C_EMPTY` — lightness/chroma of the empty bar track on a dark terminal.
+- `DARK_PALETTE` / `LIGHT_PALETTE` — everything that differs between a dark and a light
+  terminal in one place per background: the lightness of the fill and of the empty track,
+  the text colour, the lightness of the model/directory bars, and the legacy SGR codes the
+  16-colour renderer uses (see
+  [Colour depth and light terminals](#colour-depth-and-light-terminals)).
 - `FIXED_HEX` — brand colour of the fixed (model / directory) bars.
+- `SEP_RGB` — colour of the diamond drawn between segments.
+- `RAMP16` — where the green / yellow / red zones of the 16-colour ramp meet.
+- `EFFORT_SGR` — the legacy SGR colour per effort level, used at 16 colours.
 - `ICON_*` — glyph codepoints (swap these if your Nerd Font differs).
-- `STARTUP_SGR` / `STARTUP_TEXT` / `STARTUP_SEP` — the legacy-colour escape, wording and
-  separator of the startup line (see [The startup line](#the-startup-line)). `40;37` is
-  grey on black; `40;90` is dimmer, `40;97` brighter.
+- `STARTUP_SGR` / `STARTUP_SGR_LIGHT` / `STARTUP_TEXT` / `STARTUP_SEP` — the legacy-colour
+  escapes for a dark and a light terminal, plus the wording and separator of the startup
+  line (see [The startup line](#the-startup-line)). `40;37` is grey on black and `47;90`
+  grey on white; on black, `40;90` is dimmer and `40;97` brighter.
 - `SCROLL_SPEED` / `SCROLL_HOLD` / `SCROLL_MARGIN` — cells per second the line travels,
   seconds it rests at each end before turning, and cells kept free on the right for
   Claude Code's own notifications (see
@@ -214,7 +226,8 @@ earlier runs — so for that window the script prints a plain startup line inste
 ```
 
 Only the model and the working directory appear, because only those are already
-correct that early. It is drawn in grey on black so it stays out of the way, using
+correct that early. It is drawn in grey on the terminal's own background — black on a
+dark terminal, white on a light one — so it stays out of the way, using
 the 8/16 legacy ANSI colours and plain ASCII — no 24-bit escapes, no Nerd Font glyphs,
 no Powerline end-caps — so it stays readable even on a monochrome terminal, before
 anything is known about what the terminal can render. The full bar takes over once
@@ -283,27 +296,71 @@ active. Workflow state is read from `CLAUDE_CODE_DISABLE_WORKFLOWS` and the
 `disableWorkflows` setting (user → project → local; more specific wins). See
 [`docs/ultracode-detection.md`](docs/ultracode-detection.md) for the full reasoning.
 
-### The red `NO TRUECOLOR` banner
+### Colour depth and light terminals
 
-Every colour here is a 24-bit escape, and a terminal limited to the 8/16 legacy
-ANSI colours rounds all of them onto that palette — the bars keep their shape but
-lose their meaning. Rather than show a status line whose colours lie, the script
-checks for truecolor on each render and, when it is missing, replaces the entire
-line with a red banner naming the cause and linking the fix:
+The line renders in whatever the terminal can show. The measured depth picks one
+of four renderers, and each one is built for its own format rather than being a
+degraded copy of the one above it:
 
-```
- NO TRUECOLOR (tmux passes no RGB) -> https://github.com/derDere/claude-code-statusline/blob/main/docs/terminal-truecolor.md
-```
+| Depth | Ramp | Gradient | End-caps |
+|---|---|---|---|
+| `TRUECOLOR` | full OKLCH green→yellow→orange→red | yes, per cell | yes |
+| `ANSI256` | the same ramp, rounded onto the 6×6×6 cube | no — flat blocks | yes |
+| `ANSI16` | three zones: green, yellow, red | no | yes |
+| `MONO` | none; the fill is marked by reverse video | no | no |
 
-Inside tmux the verdict comes from `tmux display-message -p '#{client_termfeatures}'`
-(must contain `RGB`); outside tmux from `COLORTERM` being `truecolor`/`24bit` or
-`TERM` being a `*-direct` entry. The measurement is recorded as a colour depth
-(`MONO`, `ANSI16`, `ANSI256` or `TRUECOLOR`) together with a flag saying whether it
-was measured or merely assumed, and the banner needs a *measured* shortfall.
-Anything undecidable — including tmux answering before it has finished negotiating
-with an attaching client — counts as fine, so the banner never appears without
-cause. The fixes — most often a missing `~/.tmux.conf` plus a re-attach — are in
+Two of those choices are deliberate. `ANSI256` drops the gradient because the
+cube is far too coarse for it: neighbouring cells either round to the same index,
+which shows nothing, or jump a whole step, which shows a seam. `ANSI16` maps the
+ramp by **meaning** rather than by nearest colour — matched metrically, any
+mid-lightness green lands on grey, which would turn a healthy context bar into a
+dead one.
+
+`MONO` uses reverse video, an SGR *attribute* rather than a colour, so the fill
+level still reads where no palette exists at all. It drops the pointy end-caps
+and uses a plain `|` between segments, because at that depth nothing is known
+about the terminal beyond its lack of colour.
+
+Truecolor is detected inside tmux from `tmux display-message -p
+'#{client_termfeatures}'` (must contain `RGB`), and outside tmux from `COLORTERM`
+being `truecolor`/`24bit` or `TERM` being a `*-direct` entry. Anything
+undecidable — including tmux answering before it has finished negotiating with an
+attaching client — counts as truecolor, recorded with a flag saying the value was
+assumed rather than measured. Getting the best look on a terminal that is not
+showing it is covered in
 [`docs/terminal-truecolor.md`](docs/terminal-truecolor.md).
+
+**Light terminals** get their own palette. On a dark background the filled part of
+a bar is lighter than its empty track; on a light background that reads as a heavy
+block stamped onto the page, so the relationship is inverted — the empty track
+becomes the lighter of the two and the text turns dark. The model and directory
+bars go from deep to pale blue, and the startup line from grey-on-black to
+grey-on-white.
+
+The background is read from Claude Code's own `theme` setting in `settings.json`
+(user → project → project-local, most specific winning); every theme name begins
+with `light` or `dark`, the `-ansi` and `-daltonized` variants included. It cannot
+be measured from inside the script: the payload does not carry it, and the OSC 11
+query that would ask the terminal needs a reply on stdin, which Claude Code has
+already filled with the payload. Absent any setting the palette is the dark one,
+matching Claude Code's own default.
+
+### Overriding what is detected
+
+Both decisions can be forced from the command in `settings.json`, which is also
+how the renderers are compared without changing terminals:
+
+```sh
+uv run --project . claude-code-statusline --light
+uv run --project . claude-code-statusline --colors 16
+uv run --project . claude-code-statusline --colors mono --light
+```
+
+`--light` / `--dark` set the background. `--colors` takes `truecolor` (or
+`24bit`), `256` (`ansi256`), `16` (`ansi16`) or `mono` (`bw`). Unrecognised
+arguments are ignored rather than treated as errors — a status line that refuses
+to draw because of its own command string is worse than one that draws with
+detected values.
 
 ---
 

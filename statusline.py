@@ -71,6 +71,43 @@ DL_FILL  = 0.055
 DL_FIXED = 0.040
 
 FIXED_HEX = "#10475D"   # brand colour for model / directory bars
+SEP_RGB = (90, 100, 120)   # the diamond drawn between two segments
+
+
+# ── Palettes: how the bars sit on a dark vs a light terminal background ───────
+# A dark terminal wants a fill that is *lighter* than its empty track; a light
+# terminal wants the opposite, or every bar reads as a heavy block stamped onto
+# the page. Each palette therefore carries its own lightness pair plus the text
+# colour that stays readable across both, in 24-bit form and in legacy SGR codes
+# for the 16-colour renderer that has no lightness to tune.
+@dataclass(frozen=True)
+class Palette:
+    """Lightness and contrast parameters for one terminal background."""
+    dl_fill: float          #: lightness added to every fill colour
+    l_empty: float          #: lightness of the empty track
+    c_empty: float          #: chroma of the empty track
+    text: tuple             #: text colour on a fill bar
+    fixed_l: float          #: lightness of the model / directory bars
+    fixed_text: tuple       #: text colour on those bars
+    bright16: bool          #: use the bright SGR backgrounds for filled cells
+    track16: tuple          #: (bg, fg) SGR codes for the empty track
+    fill16_fg: int          #: SGR text colour on a filled cell
+    fixed16: tuple          #: (bg, fg) SGR codes for the model / directory bars
+    sep16: int              #: SGR text colour of the separator diamond
+
+DARK_PALETTE = Palette(
+    dl_fill=0.00, l_empty=L_EMPTY, c_empty=C_EMPTY, text=WHITE,
+    fixed_l=0.38, fixed_text=WHITE,
+    bright16=True, track16=(40, 37), fill16_fg=30, fixed16=(44, 97), sep16=90,
+)
+LIGHT_PALETTE = Palette(
+    dl_fill=0.12, l_empty=0.93, c_empty=0.040, text=(28, 32, 40),
+    fixed_l=0.86, fixed_text=(18, 38, 54),
+    bright16=False, track16=(47, 30), fill16_fg=30, fixed16=(47, 34), sep16=30,
+)
+
+#: Active palette; `main()` replaces it once the background is known.
+PALETTE = DARK_PALETTE
 
 # Effort level -> its own colour (own gradient, NOT the green->red ramp).
 # Each entry: ("solid", (L, C, H))  -> subtle left->right lightness gradient
@@ -95,6 +132,13 @@ EFFORT_COLORS = {
 EFFORT_LETTER = {
     "low": "l", "medium": "m", "high": "h",
     "xhigh": "x", "max": "m", "ultracode": "u", "wx": "wx",
+}
+# The same levels in legacy SGR: 16 colours have no lightness to tune, so each
+# level picks the nearest of the eight base hues (2 green, 3 yellow, 4 blue,
+# 5 magenta, 6 cyan) rather than being rounded off an RGB value.
+EFFORT_SGR = {
+    "low": 3, "medium": 2, "high": 4, "xhigh": 5,
+    "max": 6, "ultracode": 5, "wx": 5,
 }
 # Fill order: low fills 1/6 ... ultracode fills 6/6. Pseudo-levels NOT listed
 # here (e.g. "wx") are rendered fully filled by effort_bar().
@@ -132,6 +176,228 @@ def _fixed_lch():
     return c.get("lightness"), c.get("chroma"), c.get("hue")
 
 
+def _slope(i, width, amp):
+    """Subtle left->right lightness offset for cell i, in [-amp, +amp]."""
+    x = i / (width - 1) if width > 1 else 0.5
+    return (x - 0.5) * 2.0 * amp
+
+
+def _contrast_fg(rgb):
+    """Pick a readable text colour (dark on light cells, white on dark cells)."""
+    r, g, b = rgb
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    return (15, 18, 24) if lum > 0.62 else WHITE
+
+
+class ColorSupport(IntEnum):
+    """Colour depth a terminal can render, ordered worst to best."""
+
+    MONO = 0        #: no colour at all (TERM unset or "dumb")
+    ANSI16 = 1      #: the 8/16 legacy SGR colours
+    ANSI256 = 2     #: the indexed 256-colour palette
+    TRUECOLOR = 3   #: 24-bit RGB, what every bar in this script needs
+
+
+# ── Ink: one abstract bar cell -> the escapes a terminal understands ─────────
+def _sgr(*codes) -> str:
+    """Legacy SGR escape built from plain parameter numbers."""
+    return "\033[" + ";".join(str(c) for c in codes) + "m"
+
+
+def _x256(rgb: tuple) -> int:
+    """Nearest xterm-256 index for an sRGB triple.
+
+    Near-neutral colours go to the 24-step grey ramp, which is far finer than
+    the 6x6x6 colour cube and keeps the empty track from turning into a muddy
+    tinted block.
+    """
+    r, g, b = rgb
+    if max(rgb) - min(rgb) < 14:
+        return 232 + int(_clamp((round((r + g + b) / 3) - 8) // 10, 0, 23))
+    ax = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40
+    return 16 + 36 * ax(r) + 6 * ax(g) + ax(b)
+
+
+#: Ramp position -> base SGR colour for the 16-colour renderer. The green->red
+#: ramp carries *meaning*, so it is mapped by what it says, never by nearest
+#: RGB: matched metrically, any mid-lightness green lands on grey.
+RAMP16 = ((0.45, 2), (0.72, 3), (1.01, 1))     # green, yellow, red
+
+
+class Ink:
+    """Renders bar cells for one terminal colour depth.
+
+    Every builder asks its Ink for two escapes per cell: one that styles the
+    cell itself, and one that tints the Powerline end-cap beside it. A cap is a
+    glyph drawn in the *foreground*, so it needs its neighbouring cell's
+    background colour expressed as a foreground escape.
+
+    The lightness gradient is a class attribute because it is a question of
+    resolution, not taste: rounded onto a coarse palette it reads as banding
+    rather than as depth, so only the 24-bit renderer draws it.
+    """
+
+    gradient: bool = False   #: draw the subtle left->right lightness gradient
+    caps: bool = True        #: draw the pointy Powerline end-caps
+
+    def ramp(self, frac: float, filled: bool, i: int, width: int) -> tuple[str, str]:
+        """Cell of a fill bar at ramp position `frac`."""
+        raise NotImplementedError
+
+    def fixed(self, i: int, width: int) -> tuple[str, str]:
+        """Cell of a solid brand-coloured bar (model / directory)."""
+        raise NotImplementedError
+
+    def effort(self, level: str, kind: str, lch, filled: bool,
+               i: int, fill: int, width: int) -> tuple[str, str]:
+        """Cell of the effort bar, which carries its own colour per level."""
+        raise NotImplementedError
+
+    def separator(self) -> str:
+        """The run drawn between two segments."""
+        raise NotImplementedError
+
+
+class RgbInk(Ink):
+    """Base for the depths that can express an arbitrary sRGB triple.
+
+    Subclasses supply only the encoding; the colour decisions are made once,
+    here, so 24-bit and 256-colour cannot drift apart.
+    """
+
+    def _bg(self, rgb: tuple) -> str:
+        raise NotImplementedError
+
+    def _fg(self, rgb: tuple) -> str:
+        raise NotImplementedError
+
+    def _tilt(self, i: int, width: int, amp: float) -> float:
+        return _slope(i, width, amp) if self.gradient else 0.0
+
+    def _cell(self, rgb: tuple, text: tuple) -> tuple[str, str]:
+        return self._bg(rgb) + self._fg(text), self._fg(rgb)
+
+    def _track(self, hue: float, tilt: float) -> tuple:
+        return oklch_rgb(PALETTE.l_empty + tilt * 0.6, PALETTE.c_empty, hue)
+
+    def ramp(self, frac, filled, i, width):
+        L, C, H = _ramp_at(frac)
+        tilt = self._tilt(i, width, DL_FILL)
+        rgb = (oklch_rgb(L + PALETTE.dl_fill + tilt, C, H) if filled
+               else self._track(H, tilt))
+        return self._cell(rgb, PALETTE.text)
+
+    def fixed(self, i, width):
+        _, C, H = _fixed_lch()
+        rgb = oklch_rgb(PALETTE.fixed_l + self._tilt(i, width, DL_FIXED), C, H)
+        return self._cell(rgb, PALETTE.fixed_text)
+
+    def effort(self, level, kind, lch, filled, i, fill, width):
+        tilt = self._tilt(i, width, DL_FILL)
+        if not filled:
+            rgb = self._track(320.0 if kind == "rainbow" else lch[2], tilt)
+        elif kind == "rainbow":
+            f = i / (fill - 1) if fill > 1 else 0.0
+            rgb = oklch_rgb(0.70 + PALETTE.dl_fill + tilt * 0.3, 0.16, 300.0 * f)
+        else:
+            L, C, H = lch
+            rgb = oklch_rgb(L + PALETTE.dl_fill + tilt, C, H)
+        return self._cell(rgb, _contrast_fg(rgb))
+
+    def separator(self):
+        return RESET + self._fg(SEP_RGB) + f" {DIAMOND} " + RESET
+
+
+class TrueColorInk(RgbInk):
+    """24-bit RGB: the full ramp with its left->right lightness gradient."""
+
+    gradient = True
+
+    def _bg(self, rgb): return bg(*rgb)
+    def _fg(self, rgb): return fg(*rgb)
+
+
+class Ansi256Ink(RgbInk):
+    """The indexed 256-colour palette, drawn as flat blocks.
+
+    The 6x6x6 cube is far too coarse for a subtle gradient: neighbouring cells
+    either round to the same index, which shows nothing, or jump a whole cube
+    step, which shows a seam.
+    """
+
+    def _bg(self, rgb): return f"\033[48;5;{_x256(rgb)}m"
+    def _fg(self, rgb): return f"\033[38;5;{_x256(rgb)}m"
+
+
+class Ansi16Ink(Ink):
+    """The 8/16 legacy SGR colours.
+
+    Neither a gradient nor an orange exists at this depth, so the ramp collapses
+    to three honest zones and every bar is flat.
+    """
+
+    def _lit(self, base: int) -> tuple[str, str]:
+        b = (100 + base) if PALETTE.bright16 else (40 + base)
+        return _sgr(b, PALETTE.fill16_fg), _sgr(b - 10)
+
+    def _empty(self) -> tuple[str, str]:
+        b, f = PALETTE.track16
+        return _sgr(b, f), _sgr(b - 10)
+
+    def ramp(self, frac, filled, i, width):
+        if not filled:
+            return self._empty()
+        return self._lit(next(c for t, c in RAMP16 if frac < t))
+
+    def fixed(self, i, width):
+        b, f = PALETTE.fixed16
+        return _sgr(b, f), _sgr(b - 10)
+
+    def effort(self, level, kind, lch, filled, i, fill, width):
+        return self._lit(EFFORT_SGR.get(level, 5)) if filled else self._empty()
+
+    def separator(self):
+        return RESET + _sgr(PALETTE.sep16) + f" {DIAMOND} " + RESET
+
+
+class MonoInk(Ink):
+    """No colour at all.
+
+    Reverse video is an SGR *attribute*, not a colour, so a filled cell still
+    reads as filled where no palette exists. The pointy caps are dropped: at
+    this depth nothing is known about the terminal beyond its lack of colour.
+    """
+
+    caps = False
+
+    def _state(self, filled: bool) -> tuple[str, str]:
+        return ("\033[7m" if filled else "\033[27m"), ""
+
+    def ramp(self, frac, filled, i, width):
+        return self._state(filled)
+
+    def fixed(self, i, width):
+        return self._state(True)
+
+    def effort(self, level, kind, lch, filled, i, fill, width):
+        return self._state(filled)
+
+    def separator(self):
+        """A plain pipe: the pointy caps are gone here, and so is the diamond."""
+        return " | "
+
+
+INKS = {
+    ColorSupport.MONO:      MonoInk,
+    ColorSupport.ANSI16:    Ansi16Ink,
+    ColorSupport.ANSI256:   Ansi256Ink,
+    ColorSupport.TRUECOLOR: TrueColorInk,
+}
+
+#: Active renderer; `main()` replaces it once the colour depth is known.
+INK = TrueColorInk()
+
+
 # ── Segment builders ──────────────────────────────────────────────────────────
 def _label(icon, text):
     """Build a padded ` icon text ` label, gracefully handling empty icon/text."""
@@ -149,24 +415,22 @@ def _pad(label, min_width):
     return label[:-1] + " " * (min_width - len(label)) + label[-1]
 
 
-def _slope(i, width, amp):
-    """Subtle left->right lightness offset for cell i, in [-amp, +amp]."""
-    x = i / (width - 1) if width > 1 else 0.5
-    return (x - 0.5) * 2.0 * amp
 
 
-def _wrap(content, left_rgb, right_rgb):
-    """Add pointy end-caps coloured to match the bar's edge cells."""
-    return (RESET + fg(*left_rgb) + PL_L +
-            content +
-            RESET + fg(*right_rgb) + PL_R + RESET)
+def _compose(label, cells):
+    """Join styled cells into one segment, capping it when the Ink draws caps.
+
+    `cells` carries one (cell escape, cap tint) pair per character of `label`,
+    as produced by the active Ink.
+    """
+    body = "".join(esc + ch for (esc, _), ch in zip(cells, label))
+    if not INK.caps:
+        return body + RESET
+    return (RESET + cells[0][1] + PL_L +
+            body +
+            RESET + cells[-1][1] + PL_R + RESET)
 
 
-def _contrast_fg(rgb):
-    """Pick a readable text colour (dark on light cells, white on dark cells)."""
-    r, g, b = rgb
-    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-    return (15, 18, 24) if lum > 0.62 else WHITE
 
 
 def bar(icon, text, pct, min_width=0, alwaysfill=False):
@@ -179,32 +443,16 @@ def bar(icon, text, pct, min_width=0, alwaysfill=False):
     label = _pad(_label(icon, text), min_width)
     width = len(label)
     p = _clamp(float(pct) if pct is not None else 0.0, 0.0, 100.0)
-
-    lf, cf, hf = _ramp_at(p / 100.0)
     split = width if alwaysfill else int(round(width * p / 100.0))
-
-    def cell_rgb(i):
-        if i < split:                                   # lit (gradient)
-            return oklch_rgb(lf + _slope(i, width, DL_FILL), cf, hf)
-        return oklch_rgb(L_EMPTY + _slope(i, width, DL_FILL) * 0.6, C_EMPTY, hf)
-
-    content = "".join(bg(*cell_rgb(i)) + fg(*WHITE) + ch
-                      for i, ch in enumerate(label))
-    return _wrap(content, cell_rgb(0), cell_rgb(width - 1))
+    return _compose(label, [INK.ramp(p / 100.0, i < split, i, width)
+                            for i in range(width)])
 
 
 def fixed_bar(icon, text):
-    """Solid brand-colour bar (#10475D) with a subtle lightness gradient."""
+    """Solid brand-colour bar (FIXED_HEX) for the model and directory segments."""
     label = _label(icon, text)
     width = len(label)
-    lb, cb, hb = _fixed_lch()
-
-    def cell_rgb(i):
-        return oklch_rgb(lb + _slope(i, width, DL_FIXED), cb, hb)
-
-    content = "".join(bg(*cell_rgb(i)) + fg(*WHITE) + ch
-                      for i, ch in enumerate(label))
-    return _wrap(content, cell_rgb(0), cell_rgb(width - 1))
+    return _compose(label, [INK.fixed(i, width) for i in range(width)])
 
 
 def effort_bar(level):
@@ -220,20 +468,8 @@ def effort_bar(level):
     width = len(text)
     fill = EFFORT_ORDER.index(level) + 1 if level in EFFORT_ORDER else width
 
-    def cell_rgb(i):
-        slope = (i / (width - 1) - 0.5) * 2.0 * DL_FILL if width > 1 else 0.0
-        if i < fill:                                   # filled (level colour)
-            if kind == "rainbow":
-                f = i / (fill - 1) if fill > 1 else 0.0
-                return oklch_rgb(0.70 + slope * 0.3, 0.16, 300.0 * f)
-            L, C, H = lch
-            return oklch_rgb(L + slope, C, H)
-        hue = 320.0 if kind == "rainbow" else lch[2]   # dark track, same hue
-        return oklch_rgb(L_EMPTY + slope * 0.6, C_EMPTY, hue)
-
-    content = "".join(bg(*cell_rgb(i)) + fg(*_contrast_fg(cell_rgb(i))) + ch
-                      for i, ch in enumerate(text))
-    return _wrap(content, cell_rgb(0), cell_rgb(width - 1))
+    return _compose(text, [INK.effort(level, kind, lch, i < fill, i, fill, width)
+                           for i in range(width)])
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
@@ -318,18 +554,10 @@ def get_cwd():
 
 
 # ── Terminal colour capabilities ──────────────────────────────────────────────
-# Every colour here is a 24-bit escape. A terminal limited to the 8/16 legacy
-# ANSI colours rounds all of them onto that palette, so the bars keep their
-# shape but lose their meaning -- a silently wrong status line. When that is
-# detected *with certainty*, the whole line is replaced by the banner below.
-DOC_URL = ("https://github.com/derDere/claude-code-statusline"
-           "/blob/main/docs/terminal-truecolor.md")
-
-# Legacy SGR (bold / red background / bright white) instead of 24-bit escapes,
-# so the banner renders correctly in exactly the terminals it warns about.
-ERR_SGR = "\033[1;41;97m"
-
-
+# The measured depth selects a renderer from INKS, so every terminal gets a real
+# status line rather than a refusal. What the depth costs is detail: the
+# left->right gradient needs 24-bit, and the green->yellow->orange->red ramp
+# loses its orange once it is down to the eight base hues.
 def _tmux_termfeatures() -> set[str] | None:
     """Terminal features tmux negotiated for the attached client, or None.
 
@@ -353,13 +581,6 @@ def _tmux_termfeatures() -> set[str] | None:
         return None
 
 
-class ColorSupport(IntEnum):
-    """Colour depth a terminal can render, ordered worst to best."""
-
-    MONO = 0        #: no colour at all (TERM unset or "dumb")
-    ANSI16 = 1      #: the 8/16 legacy SGR colours
-    ANSI256 = 2     #: the indexed 256-colour palette
-    TRUECOLOR = 3   #: 24-bit RGB, what every bar in this script needs
 
 
 @dataclass(frozen=True)
@@ -382,11 +603,6 @@ class ColorCaps:
     def truecolor(self) -> bool:
         """Whether 24-bit escapes reach the terminal faithfully."""
         return self.level >= ColorSupport.TRUECOLOR
-
-    @property
-    def banner_worthy(self) -> bool:
-        """Whether the bars must be replaced by the NO TRUECOLOR banner."""
-        return self.certain and not self.truecolor
 
 
 #: Colour capabilities of the terminal this process writes to. Assumed-truecolor
@@ -443,10 +659,75 @@ def detect_color_caps() -> ColorCaps:
         return assumed
 
 
-def error_line(reason: str | None) -> str:
-    """Full-line red banner naming the problem and where its fix is documented."""
-    why = reason or "no 24-bit colour"
-    return f"{ERR_SGR} NO TRUECOLOR ({why}) -> {DOC_URL} {RESET}"
+# ── Terminal background and command-line overrides ───────────────────────────
+# Whether the terminal is light or dark cannot be measured from inside this
+# script: the payload does not carry it, and the OSC 11 query that would ask the
+# terminal directly needs a reply on stdin -- which Claude Code has already
+# filled with the payload. Claude Code's own theme setting is the readable
+# answer, and its names all begin with "light" or "dark" (the plain, "-ansi" and
+# "-daltonized" variants alike).
+def detect_background(data) -> str:
+    """Return "light" or "dark" from Claude Code's configured theme.
+
+    Reads the same settings cascade as `workflows_enabled()` -- user, then
+    project, then project-local, with the most specific winning. Defaults to
+    "dark", which is Claude Code's own default.
+    """
+    theme = ""
+    home = os.path.expanduser("~")
+    proj = ((data.get("workspace") or {}).get("project_dir")
+            or data.get("cwd") or os.getcwd())
+    for path in (os.path.join(home, ".claude", "settings.json"),
+                 os.path.join(proj, ".claude", "settings.json"),
+                 os.path.join(proj, ".claude", "settings.local.json")):
+        cfg = _read_json(path)
+        if isinstance(cfg, dict) and isinstance(cfg.get("theme"), str):
+            theme = cfg["theme"]
+    return "light" if theme.strip().lower().startswith("light") else "dark"
+
+
+#: Depth names accepted by --colors.
+COLOR_ARGS = {
+    "mono": ColorSupport.MONO, "bw": ColorSupport.MONO,
+    "ansi16": ColorSupport.ANSI16, "16": ColorSupport.ANSI16,
+    "ansi256": ColorSupport.ANSI256, "256": ColorSupport.ANSI256,
+    "truecolor": ColorSupport.TRUECOLOR, "24bit": ColorSupport.TRUECOLOR,
+}
+
+
+@dataclass(frozen=True)
+class Overrides:
+    """What the command line forces, in place of what would be detected."""
+
+    background: str | None = None      #: "light", "dark", or None to detect
+    level: ColorSupport | None = None  #: forced colour depth, or None to detect
+
+    def level_caps(self) -> "ColorCaps | None":
+        """The forced depth as a ColorCaps, or None when nothing was forced."""
+        if self.level is None:
+            return None
+        return ColorCaps(level=self.level, certain=True,
+                         reason="forced on the command line")
+
+
+def parse_args(argv) -> Overrides:
+    """Read `--light`, `--dark` and `--colors LEVEL` (or `--colors=LEVEL`).
+
+    Unrecognised arguments are ignored on purpose: this script is invoked from a
+    command string in settings.json, and a status line that aborts over its own
+    arguments is worse than one that renders with detected values.
+    """
+    background = level = None
+    rest = iter(argv)
+    for arg in rest:
+        if arg == "--light":
+            background = "light"
+        elif arg == "--dark":
+            background = "dark"
+        elif arg.startswith("--colors"):
+            value = arg.split("=", 1)[1] if "=" in arg else next(rest, "")
+            level = COLOR_ARGS.get(value.strip().lower(), level)
+    return Overrides(background, level)
 
 
 # ── Startup line ──────────────────────────────────────────────────────────────
@@ -454,7 +735,8 @@ def error_line(reason: str | None) -> str:
 # so it is deliberately the plainest thing this script can draw: the 8/16 legacy
 # SGR colours and plain ASCII only -- no 24-bit escapes, no Nerd Font glyphs, no
 # Powerline end-caps. It stays readable on a monochrome terminal.
-STARTUP_SGR = "\033[40;37m"   # black background, grey text -- deliberately quiet
+STARTUP_SGR = "\033[40;37m"        # dark terminal: grey on black, deliberately quiet
+STARTUP_SGR_LIGHT = "\033[47;90m"  # light terminal: grey on white, same idea
 STARTUP_TEXT = "starting..."
 STARTUP_SEP = " | "
 
@@ -490,7 +772,8 @@ def startup_line(data) -> str:
               model_label(mid, model.get("display_name") or mid),
               get_cwd()]
     body = STARTUP_SEP.join(b for b in blocks if b)
-    return f"{STARTUP_SGR} {body} {RESET}"
+    sgr = STARTUP_SGR_LIGHT if PALETTE is LIGHT_PALETTE else STARTUP_SGR
+    return f"{sgr} {body} {RESET}"
 
 
 # ── Icons (Nerd Font) ─────────────────────────────────────────────────────────
@@ -687,19 +970,25 @@ def main():
     except Exception:
         pass
 
+    # The background decides every lightness in the line, the startup line's
+    # included, so it is settled before anything is drawn. It needs no terminal
+    # probing -- it comes from Claude Code's own theme setting.
+    global COLOR, INK, PALETTE
+    opts = parse_args(sys.argv[1:])
+    PALETTE = (LIGHT_PALETTE
+               if (opts.background or detect_background(data)) == "light"
+               else DARK_PALETTE)
+
     # Before the first API response the payload is still filling in. Announce
     # that plainly instead of drawing bars over fields that have not arrived.
     if is_starting(data):
         sys.stdout.write(startup_line(data) + "\n")
         return
 
-    # A terminal without 24-bit colour turns every bar into a lie -> say so
-    # instead of rendering a status line that cannot be trusted.
-    global COLOR
-    COLOR = detect_color_caps()
-    if COLOR.banner_worthy:
-        sys.stdout.write(error_line(COLOR.reason) + "\n")
-        return
+    # Pick the renderer for whatever colour depth this terminal has. Every
+    # depth draws a real status line, so nothing is refused here.
+    COLOR = opts.level_caps() or detect_color_caps()
+    INK = INKS[COLOR.level]()
 
     mid   = data.get("model", {}).get("id", "")
     mname = data.get("model", {}).get("display_name", mid)
@@ -778,8 +1067,7 @@ def main():
     # 7. Working directory (fixed)
     segs.append(fixed_bar(ICON_DIR, get_cwd()))
 
-    sep = RESET + fg(90, 100, 120) + f" {DIAMOND} " + RESET
-    sys.stdout.write(marquee(sep.join(segs)) + "\n")
+    sys.stdout.write(marquee(INK.separator().join(segs)) + "\n")
 
 
 if __name__ == "__main__":
